@@ -89,6 +89,8 @@ async function testDataExtraction() {
   const extractBtn = document.getElementById('extractDataBtn');
   const dataDiv = document.getElementById('extractedData');
   
+  console.log('testDataExtraction called');
+  
   // Show loading state
   extractBtn.disabled = true;
   extractBtn.textContent = 'Extracting...';
@@ -99,33 +101,40 @@ async function testDataExtraction() {
     // Get current tab
     const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
     
+    console.log('Current tab:', tab.url);
+    
     if (!tab.url.includes('uottawa.brightspace.com')) {
       throw new Error('Not on Brightspace page');
     }
     
     // Send message to content script to extract data
+    console.log('Sending extractData message...');
     const response = await chrome.tabs.sendMessage(tab.id, {
       action: 'extractData'
     });
+    
+    console.log('Got response:', response);
     
     if (response && response.success) {
       // Display extracted data
       dataDiv.innerHTML = `
         <strong>✅ Data Extracted Successfully!</strong><br>
         <strong>Page Type:</strong> ${response.pageType}<br>
-        <strong>Data Types Found:</strong> ${response.dataTypes.join(', ')}<br>
+        <strong>Course:</strong> ${response.courseName || 'N/A'}<br>
+        <strong>Course ID:</strong> ${response.courseId || 'N/A'}<br>
+        <strong>Data Types Found:</strong> ${response.dataTypes?.join(', ') || 'None'}<br>
         <strong>Items Count:</strong> ${response.itemCount || 0}<br>
         <br>
         <strong>Sample Data:</strong>
-        <pre>${JSON.stringify(response.sampleData, null, 2)}</pre>
+        <pre style="max-height: 100px; overflow: auto; font-size: 10px;">${JSON.stringify(response.sampleData || response.items?.slice(0, 2), null, 2)}</pre>
       `;
     } else {
       dataDiv.innerHTML = '❌ No data extracted - may not be on a supported page';
     }
     
   } catch (error) {
-    dataDiv.innerHTML = '❌ Extraction failed: ' + error.message;
     console.error('Data extraction error:', error);
+    dataDiv.innerHTML = '❌ Extraction failed: ' + error.message;
   } finally {
     // Reset button
     extractBtn.disabled = false;
@@ -208,7 +217,7 @@ async function sendTestQuery() {
     }
     
     // Send query to backend
-    const response = await fetch(`${BACKEND_URL}/api/chat`, {
+    const response = await fetch(`${BACKEND_URL}/api/extension/chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json'
