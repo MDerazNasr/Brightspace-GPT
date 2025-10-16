@@ -1,7 +1,7 @@
 # API Documentation
 
 ## Base URL
-- Development: `http://localhost:8000/api`
+- Development: `http://localhost:8001/api`
 - Production: `https://assistant.uottawa.ca/api`
 
 ## Authentication

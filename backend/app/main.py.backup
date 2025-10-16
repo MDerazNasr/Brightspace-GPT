@@ -80,14 +80,11 @@ if extension:
 @app.on_event("startup")
 async def startup_event():
     """Initialize application on startup."""
-    print("⚠️ Skipping database initialization for extension testing")
-    # Database not needed for Phase 1 extension testing
-    # Uncomment below when ready to use database features
-    # try:
-    #     await init_db()
-    #     print("✅ Database initialized")
-    # except Exception as e:
-    #     print(f"⚠️ Database initialization failed: {e}")
+    try:
+        await init_db()
+        print("✅ Database initialized")
+    except Exception as e:
+        print(f"⚠️ Database initialization failed: {e}")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -114,6 +111,6 @@ if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",
         host="0.0.0.0",
-        port=8001,
+        port=8000,
         reload=getattr(settings, 'DEBUG', True)
     )
