@@ -22,6 +22,12 @@ function setupEventListeners() {
       sendTestQuery();
     }
   });
+  
+  // Button click listeners
+  document.getElementById('extractDataBtn').addEventListener('click', testDataExtraction);
+  document.getElementById('detectPageBtn').addEventListener('click', detectCurrentPage);
+  document.getElementById('testBackendBtn').addEventListener('click', testBackendConnection);
+  document.getElementById('sendTestBtn').addEventListener('click', sendTestQuery);
 }
 
 async function checkInitialStatus() {
@@ -225,7 +231,7 @@ async function sendTestQuery() {
       body: JSON.stringify({
         query: query,
         brightspace_data: brightspaceData,
-        user_id: 'test_user_' + Date.now() // Temporary for Phase 1
+        user_id: 'test_user_' + Date.now()
       })
     });
     
@@ -250,12 +256,4 @@ async function sendTestQuery() {
     sendBtn.textContent = 'Send Test Query';
     queryInput.value = '';
   }
-}
-
-// Utility function to format data for display
-function formatDataForDisplay(data) {
-  if (typeof data === 'object') {
-    return JSON.stringify(data, null, 2);
-  }
-  return String(data);
 }
