@@ -1,459 +1,411 @@
-// extension/content-scripts/brightspace-detector.js
-// Phase 1: Basic data detection and extraction from Brightspace
+// content-scripts/brightspace-detector.js
+// Complete version using Brightspace API (more reliable than Shadow DOM)
 
-console.log('🎓 uOttawa Brightspace Assistant content script loaded');
+console.log('🎓 Brightspace GPT content script loaded');
 
-class BrightspaceDetector {
+class BrightspaceExtractor {
   constructor() {
-    this.pageType = 'unknown';
-    this.courseId = null;
-    this.courseName = null;
-    
-    // Initialize detection
-    this.detectPageType();
-    this.detectCourseInfo();
+    this.baseUrl = 'https://uottawa.brightspace.com';
+    this.courses = [];
   }
-  
-  detectPageType() {
-    const url = window.location.href;
-    const pathname = window.location.pathname;
-    
-    // Basic page type detection based on URL patterns
-    if (url.includes('/grades/') || url.includes('my_grades')) {
-      this.pageType = 'grades';
-    } else if (url.includes('/news/') || url.includes('/announcements/')) {
-      this.pageType = 'announcements';
-    } else if (url.includes('/dropbox/') || url.includes('/assignments/')) {
-      this.pageType = 'assignments';
-    } else if (url.includes('/calendar/')) {
-      this.pageType = 'calendar';
-    } else if (url.includes('/content/')) {
-      this.pageType = 'content';
-    } else if (url.includes('/home/')) {
-      this.pageType = 'homepage';
-    } else if (pathname.includes('/d2l/le/')) {
-      this.pageType = 'course_page';
-    } else {
-      this.pageType = 'other';
-    }
-    
-    console.log('Detected page type:', this.pageType);
-  }
-  
-  detectCourseInfo() {
-    // Try to extract course ID from URL
-    const urlMatch = window.location.href.match(/\/(\d+)\//);
-    if (urlMatch) {
-      this.courseId = urlMatch[1];
-    }
-    
-    // Try to get course name from page
-    const courseNameSelectors = [
-      '.d2l-course-name',
-      '.d2l-page-title',
-      '.d2l-navigation-s-course-name',
-      '[data-automation-id="course-name"]',
-      '.navbar-course-title'
-    ];
-    
-    for (const selector of courseNameSelectors) {
-      const element = document.querySelector(selector);
-      if (element && element.textContent.trim()) {
-        this.courseName = element.textContent.trim();
-        break;
+
+  /**
+   * Extract courses using Brightspace API (RECOMMENDED - more reliable)
+   */
+  async extractCoursesViaAPI() {
+    try {
+      console.log('📡 Fetching courses from Brightspace API...');
+      const response = await fetch('https://uottawa.brightspace.com/d2l/api/lp/1.43/enrollments/myenrollments/');
+      
+      if (!response.ok) {
+        throw new Error(`API returned ${response.status}`);
       }
+      
+      const data = await response.json();
+      console.log(`✅ API returned ${data.Items.length} enrollments`);
+      
+      const courses = data.Items.map(item => ({
+        name: item.OrgUnit.Name,
+        code: item.OrgUnit.Code,
+        orgUnitId: item.OrgUnit.Id.toString(),
+        homepage: `https://uottawa.brightspace.com/d2l/home/${item.OrgUnit.Id}`,
+        type: item.OrgUnit.Type?.Name,
+        isActive: item.Access?.IsActive || false,
+        startDate: item.OrgUnit.StartDate || null,
+        endDate: item.OrgUnit.EndDate || null
+      }));
+      
+      // Filter to only active courses (optional)
+      // const activeCourses = courses.filter(c => c.isActive);
+      
+      this.courses = courses;
+      console.log(`✅ Extracted ${courses.length} courses via API`);
+      return courses;
+      
+    } catch (error) {
+      console.error('❌ API extraction failed:', error);
+      console.log('⚠️ Falling back to Shadow DOM extraction...');
+      // Fallback to Shadow DOM method
+      return this.extractCoursesViaShadowDOM();
     }
-    
-    console.log('Course info:', { id: this.courseId, name: this.courseName });
   }
-  
-  extractBasicPageData() {
-    const data = {
-      pageType: this.pageType,
-      courseId: this.courseId,
-      courseName: this.courseName,
-      url: window.location.href,
-      timestamp: new Date().toISOString(),
-      dataTypes: [],
-      items: [],
-      sampleData: {}
-    };
-    
-    // Extract data based on page type
-    switch (this.pageType) {
-      case 'grades':
-        data.items = this.extractGradesData();
-        data.dataTypes.push('grades');
-        break;
-        
-      case 'announcements':
-        data.items = this.extractAnnouncementsData();
-        data.dataTypes.push('announcements');
-        break;
-        
-      case 'assignments':
-        data.items = this.extractAssignmentsData();
-        data.dataTypes.push('assignments');
-        break;
-        
-      case 'calendar':
-        data.items = this.extractCalendarData();
-        data.dataTypes.push('calendar');
-        break;
-        
-      case 'homepage':
-        // Try to extract multiple types from homepage
-        const homeGrades = this.extractGradesData();
-        const homeAnnouncements = this.extractAnnouncementsData();
-        const homeAssignments = this.extractAssignmentsData();
-        
-        if (homeGrades.length > 0) {
-          data.items.push(...homeGrades);
-          data.dataTypes.push('grades');
+
+  /**
+   * Extract courses from Shadow DOM (FALLBACK - has timing issues)
+   */
+  async extractCoursesViaShadowDOM() {
+    return new Promise((resolve) => {
+      const maxRetries = 10;
+      let attempt = 0;
+      
+      const tryExtract = () => {
+        try {
+          attempt++;
+          console.log(`🔄 Shadow DOM extraction attempt ${attempt}/${maxRetries}`);
+          
+          const courses = [];
+          
+          const myCoursesWidget = document.querySelector('d2l-my-courses');
+          if (!myCoursesWidget?.shadowRoot) {
+            console.log('❌ d2l-my-courses not found');
+            if (attempt < maxRetries) {
+              setTimeout(tryExtract, 1000);
+              return;
+            }
+            resolve([]);
+            return;
+          }
+          
+          const container = myCoursesWidget.shadowRoot.querySelector('d2l-my-courses-container');
+          if (!container?.shadowRoot) {
+            console.log('❌ d2l-my-courses-container not found');
+            if (attempt < maxRetries) {
+              setTimeout(tryExtract, 1000);
+              return;
+            }
+            resolve([]);
+            return;
+          }
+          
+          const contentPanels = container.shadowRoot.querySelectorAll('d2l-my-courses-content');
+          console.log(`✅ Found ${contentPanels.length} content panels`);
+          
+          let foundDataInAnyPanel = false;
+          
+          contentPanels.forEach((panel, panelIndex) => {
+            if (!panel.shadowRoot) return;
+            
+            const cardGrid = panel.shadowRoot.querySelector('d2l-my-courses-card-grid');
+            if (!cardGrid?.shadowRoot) return;
+            
+            const enrollmentCards = cardGrid.shadowRoot.querySelectorAll('d2l-enrollment-card');
+            
+            enrollmentCards.forEach((card) => {
+              try {
+                const org = card._organization;
+                const enrollment = card._enrollment;
+                
+                if (!org || !org.properties) {
+                  return;
+                }
+                
+                foundDataInAnyPanel = true;
+                
+                const courseData = {
+                  name: org.properties.name || 'Unknown Course',
+                  code: org.properties.code || 'N/A',
+                  orgUnitId: org.properties.orgUnitId || null,
+                  homepage: org._linksByRel?.['https://api.brightspace.com/rels/organization-homepage']?.[0]?.href,
+                  gradesUrl: enrollment?.links?.find(link => link.rel?.includes('user-course-grades'))?.href,
+                  finalGradeUrl: enrollment?.links?.find(link => link.rel?.includes('user-final-grade'))?.href,
+                  startDate: org.properties.startDate || null,
+                  endDate: org.properties.endDate || null,
+                  isActive: org.properties.isActive !== false
+                };
+                
+                courses.push(courseData);
+              } catch (error) {
+                console.error(`❌ Error extracting card:`, error);
+              }
+            });
+          });
+          
+          if (courses.length > 0) {
+            console.log(`✅ Shadow DOM extracted ${courses.length} courses`);
+            this.courses = courses;
+            resolve(courses);
+          } else if (foundDataInAnyPanel) {
+            console.log(`⚠️ Found data but extracted 0 courses`);
+            if (attempt < maxRetries) {
+              setTimeout(tryExtract, 1000);
+            } else {
+              resolve([]);
+            }
+          } else {
+            console.log(`⏳ No course data loaded yet (attempt ${attempt}/${maxRetries})`);
+            if (attempt < maxRetries) {
+              setTimeout(tryExtract, 1000);
+            } else {
+              console.log('❌ Gave up after', maxRetries, 'attempts');
+              resolve([]);
+            }
+          }
+          
+        } catch (error) {
+          console.error('❌ Error in Shadow DOM extraction:', error);
+          if (attempt < maxRetries) {
+            setTimeout(tryExtract, 1000);
+          } else {
+            resolve([]);
+          }
         }
-        if (homeAnnouncements.length > 0) {
-          data.items.push(...homeAnnouncements);
-          data.dataTypes.push('announcements');
-        }
-        if (homeAssignments.length > 0) {
-          data.items.push(...homeAssignments);
-          data.dataTypes.push('assignments');
-        }
-        break;
-        
-      default:
-        // Try to extract any available data
-        data.items = this.extractGenericData();
-        data.dataTypes.push('generic');
-    }
-    
-    // Create sample data for testing
-    data.sampleData = data.items.slice(0, 3); // First 3 items as sample
-    data.itemCount = data.items.length;
-    
-    return data;
+      };
+      
+      tryExtract();
+    });
   }
-  
-  extractGradesData() {
+
+  /**
+   * Main extraction method - tries API first, falls back to Shadow DOM
+   */
+  async extractCourses() {
+    return this.extractCoursesViaAPI();
+  }
+
+  /**
+   * Extract grades from grades page
+   */
+  extractGrades() {
     const grades = [];
     
-    // Common selectors for grades in Brightspace
-    const gradeSelectors = [
-      '.d2l-grades-table-row',
-      '.d2l-grade-result',
-      '[data-automation-id*="grade"]',
-      '.d2l-table-row-last'
-    ];
-    
-    for (const selector of gradeSelectors) {
-      const elements = document.querySelectorAll(selector);
+    try {
+      if (!window.location.href.includes('/grades/')) {
+        return { error: 'Not on grades page' };
+      }
+
+      const gradeRows = document.querySelectorAll('.d2l-table tbody tr, table.d_ggl tbody tr');
       
-      elements.forEach((element, index) => {
-        const gradeData = this.extractGradeFromElement(element, index);
-        if (gradeData) {
-          grades.push(gradeData);
+      gradeRows.forEach(row => {
+        const cells = row.querySelectorAll('td');
+        if (cells.length >= 3) {
+          grades.push({
+            item: cells[0]?.textContent.trim(),
+            grade: cells[1]?.textContent.trim(),
+            outOf: cells[2]?.textContent.trim(),
+            weight: cells[3]?.textContent.trim(),
+            feedback: cells[4]?.textContent.trim()
+          });
         }
       });
+
+      return {
+        grades,
+        courseId: this.extractCourseIdFromUrl(),
+        extractedAt: new Date().toISOString()
+      };
       
-      if (grades.length > 0) break; // Found grades, stop trying other selectors
-    }
-    
-    return grades;
-  }
-  
-  extractGradeFromElement(element, index) {
-    try {
-      // Try to extract grade information from element
-      const assignmentName = this.getTextFromSelectors(element, [
-        '.d2l-link',
-        '.d2l-assignment-name',
-        '.d2l-grade-name',
-        'a',
-        'td:first-child'
-      ]);
-      
-      const gradeValue = this.getTextFromSelectors(element, [
-        '.d2l-grade',
-        '.d2l-grade-value',
-        '[data-automation-id*="grade"]',
-        'td:last-child',
-        '.d2l-grade-result'
-      ]);
-      
-      const feedback = this.getTextFromSelectors(element, [
-        '.d2l-feedback',
-        '.d2l-grade-feedback',
-        '.d2l-comment'
-      ]);
-      
-      if (assignmentName || gradeValue) {
-        return {
-          type: 'grade',
-          assignment: assignmentName || `Assignment ${index + 1}`,
-          grade: gradeValue || 'Not graded',
-          feedback: feedback || '',
-          courseId: this.courseId,
-          extractedAt: new Date().toISOString()
-        };
-      }
     } catch (error) {
-      console.log('Error extracting grade:', error);
+      console.error('Error extracting grades:', error);
+      return { error: error.message };
     }
-    
-    return null;
   }
-  
-  extractAnnouncementsData() {
+
+  /**
+   * Extract announcements
+   */
+  extractAnnouncements() {
     const announcements = [];
     
-    const announcementSelectors = [
-      '.d2l-news-item',
-      '.d2l-announcement',
-      '[data-automation-id*="news"]',
-      '.d2l-widget-content'
-    ];
-    
-    for (const selector of announcementSelectors) {
-      const elements = document.querySelectorAll(selector);
-      
-      elements.forEach((element, index) => {
-        const announcementData = this.extractAnnouncementFromElement(element, index);
-        if (announcementData) {
-          announcements.push(announcementData);
-        }
-      });
-      
-      if (announcements.length > 0) break;
-    }
-    
-    return announcements;
-  }
-  
-  extractAnnouncementFromElement(element, index) {
     try {
-      const title = this.getTextFromSelectors(element, [
-        '.d2l-news-title',
-        '.d2l-announcement-title',
-        'h3',
-        'h4',
-        '.d2l-link'
-      ]);
+      const announcementItems = document.querySelectorAll('d2l-labs-list-item, .d2l-homepage-announcement');
       
-      const content = this.getTextFromSelectors(element, [
-        '.d2l-news-body',
-        '.d2l-announcement-body',
-        '.d2l-content',
-        'p'
-      ]);
-      
-      const date = this.getTextFromSelectors(element, [
-        '.d2l-news-date',
-        '.d2l-date',
-        '[data-automation-id*="date"]'
-      ]);
-      
-      if (title || content) {
-        return {
-          type: 'announcement',
-          title: title || `Announcement ${index + 1}`,
-          content: content ? content.substring(0, 200) + '...' : '',
-          date: date || '',
-          courseId: this.courseId,
-          extractedAt: new Date().toISOString()
-        };
-      }
-    } catch (error) {
-      console.log('Error extracting announcement:', error);
-    }
-    
-    return null;
-  }
-  
-  extractAssignmentsData() {
-    const assignments = [];
-    
-    const assignmentSelectors = [
-      '.d2l-assignment-row',
-      '.d2l-dropbox-item',
-      '[data-automation-id*="assignment"]'
-    ];
-    
-    for (const selector of assignmentSelectors) {
-      const elements = document.querySelectorAll(selector);
-      
-      elements.forEach((element, index) => {
-        const assignmentData = this.extractAssignmentFromElement(element, index);
-        if (assignmentData) {
-          assignments.push(assignmentData);
-        }
-      });
-      
-      if (assignments.length > 0) break;
-    }
-    
-    return assignments;
-  }
-  
-  extractAssignmentFromElement(element, index) {
-    try {
-      const name = this.getTextFromSelectors(element, [
-        '.d2l-assignment-name',
-        '.d2l-link',
-        'a',
-        'td:first-child'
-      ]);
-      
-      const dueDate = this.getTextFromSelectors(element, [
-        '.d2l-due-date',
-        '.d2l-date',
-        '[data-automation-id*="due"]'
-      ]);
-      
-      const status = this.getTextFromSelectors(element, [
-        '.d2l-status',
-        '.d2l-assignment-status'
-      ]);
-      
-      if (name) {
-        return {
-          type: 'assignment',
-          name: name,
-          dueDate: dueDate || '',
-          status: status || 'Unknown',
-          courseId: this.courseId,
-          extractedAt: new Date().toISOString()
-        };
-      }
-    } catch (error) {
-      console.log('Error extracting assignment:', error);
-    }
-    
-    return null;
-  }
-  
-  extractCalendarData() {
-    // Basic calendar extraction
-    const events = [];
-    
-    const eventSelectors = [
-      '.d2l-calendar-event',
-      '.d2l-event',
-      '[data-automation-id*="event"]'
-    ];
-    
-    for (const selector of eventSelectors) {
-      const elements = document.querySelectorAll(selector);
-      
-      elements.forEach((element, index) => {
-        const title = this.getTextFromSelectors(element, [
-          '.d2l-event-title',
-          '.d2l-calendar-title'
-        ]);
+      announcementItems.forEach(item => {
+        const title = item.querySelector('.d2l-heading, h3, h4')?.textContent.trim();
+        const date = item.querySelector('.d2l-timestamp, time')?.textContent.trim();
+        const content = item.querySelector('.d2l-htmlblock-untrusted, .d2l-body')?.textContent.trim();
         
         if (title) {
-          events.push({
-            type: 'event',
-            title: title,
-            courseId: this.courseId,
-            extractedAt: new Date().toISOString()
+          announcements.push({
+            title,
+            date,
+            content: content?.substring(0, 500),
+            url: window.location.href
           });
         }
       });
+
+      return {
+        announcements,
+        courseId: this.extractCourseIdFromUrl(),
+        extractedAt: new Date().toISOString()
+      };
       
-      if (events.length > 0) break;
+    } catch (error) {
+      console.error('Error extracting announcements:', error);
+      return { error: error.message };
     }
-    
-    return events;
   }
-  
-  extractGenericData() {
-    // Try to extract any structured data from the page
-    const genericData = [];
+
+  /**
+   * Extract assignments
+   */
+  extractAssignments() {
+    const assignments = [];
     
-    // Look for any lists or tables
-    const lists = document.querySelectorAll('ul li, ol li, table tr');
-    
-    lists.forEach((element, index) => {
-      if (index < 5) { // Limit to first 5 items
-        const text = element.textContent?.trim();
-        if (text && text.length > 10) {
-          genericData.push({
-            type: 'generic',
-            content: text.substring(0, 100),
-            courseId: this.courseId,
-            extractedAt: new Date().toISOString()
+    try {
+      const assignmentRows = document.querySelectorAll('.d2l-datalist-item, d2l-table tbody tr');
+      
+      assignmentRows.forEach(row => {
+        const titleEl = row.querySelector('.d2l-link, a');
+        const dueDateEl = row.querySelector('.d2l-date, time, .d2l-due-date');
+        const statusEl = row.querySelector('.d2l-status, .d2l-grade-value');
+        
+        if (titleEl) {
+          assignments.push({
+            title: titleEl.textContent.trim(),
+            dueDate: dueDateEl?.textContent.trim(),
+            status: statusEl?.textContent.trim(),
+            url: titleEl.href,
+            courseId: this.extractCourseIdFromUrl()
           });
         }
-      }
-    });
-    
-    return genericData;
+      });
+
+      return {
+        assignments,
+        courseId: this.extractCourseIdFromUrl(),
+        extractedAt: new Date().toISOString()
+      };
+      
+    } catch (error) {
+      console.error('Error extracting assignments:', error);
+      return { error: error.message };
+    }
   }
-  
-  // Utility function to try multiple selectors
-  getTextFromSelectors(element, selectors) {
-    for (const selector of selectors) {
-      const found = element.querySelector(selector);
-      if (found && found.textContent?.trim()) {
-        return found.textContent.trim();
-      }
-    }
+
+  /**
+   * Extract course ID from URL
+   */
+  extractCourseIdFromUrl() {
+    const match = window.location.pathname.match(/\/(\d+)\//);
+    return match ? match[1] : null;
+  }
+
+  /**
+   * Detect current page type
+   */
+  detectPageType() {
+    const path = window.location.pathname;
     
-    // If no child selectors work, try the element itself
-    const text = element.textContent?.trim();
-    if (text && text.length > 0) {
-      return text;
-    }
+    if (path.includes('/home')) return 'home';
+    if (path.includes('/grades')) return 'grades';
+    if (path.includes('/dropbox') || path.includes('/assignments')) return 'assignments';
+    if (path.includes('/news')) return 'announcements';
+    if (path.includes('/content')) return 'content';
+    if (path.includes('/calendar')) return 'calendar';
     
-    return null;
+    return 'unknown';
+  }
+
+  /**
+   * Extract all relevant data from current page
+   */
+  async extractCurrentPageData() {
+    const pageType = this.detectPageType();
+    const data = {
+      pageType,
+      url: window.location.href,
+      courseId: this.extractCourseIdFromUrl(),
+      timestamp: new Date().toISOString()
+    };
+
+    switch (pageType) {
+      case 'home':
+        data.courses = await this.extractCourses();
+        data.announcements = this.extractAnnouncements();
+        break;
+      case 'grades':
+        data.grades = this.extractGrades();
+        break;
+      case 'assignments':
+        data.assignments = this.extractAssignments();
+        break;
+      case 'announcements':
+        data.announcements = this.extractAnnouncements();
+        break;
+      default:
+        data.courses = await this.extractCourses();
+    }
+
+    return data;
   }
 }
 
-// Initialize detector
-const detector = new BrightspaceDetector();
+// Initialize extractor
+const extractor = new BrightspaceExtractor();
 
 // Listen for messages from popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  console.log('Content script received message:', request);
+  console.log('📩 Received message:', request.action);
   
-  if (request.action === 'detectPage') {
-    sendResponse({
-      success: true,
-      pageType: detector.pageType,
-      courseId: detector.courseId,
-      courseName: detector.courseName,
-      url: window.location.href
-    });
+  if (request.action === 'ping') {
+    console.log('✅ Responding to ping');
+    sendResponse({ status: 'ok' });
+    return true;
   }
   
   if (request.action === 'extractData') {
-    try {
-      const data = detector.extractBasicPageData();
-      console.log('Extracted data:', data);
-      
-      sendResponse({
-        success: true,
-        ...data
-      });
-    } catch (error) {
-      console.error('Error extracting data:', error);
-      sendResponse({
-        success: false,
-        error: error.message
-      });
-    }
+    console.log('📊 Extracting data...');
+    extractor.extractCurrentPageData().then(data => {
+      console.log('✅ Data extracted:', data);
+      sendResponse(data);
+    });
+    return true; // Keep channel open for async
   }
   
-  return true; // Keep message channel open for async response
+  if (request.action === 'extractCourses') {
+    console.log('📚 Extracting courses via API...');
+    extractor.extractCourses().then(courses => {
+      console.log('✅ Courses extracted:', courses.length);
+      sendResponse({ courses });
+    });
+    return true; // Keep channel open for async
+  }
+  
+  return true;
 });
 
-// Auto-detect page changes (for single-page app navigation)
+// Auto-extract when page loads
+function initExtraction() {
+  setTimeout(async () => {
+    const data = await extractor.extractCurrentPageData();
+    console.log('📚 Brightspace GPT - Auto-extracted data:', data);
+    
+    if (data.courses?.length > 0 || data.grades || data.assignments) {
+      chrome.storage.local.set({
+        'brightspace_latest_data': data,
+        'brightspace_courses': data.courses || []
+      });
+    }
+  }, 3000); // Wait 3 seconds for page to settle
+}
+
+// Run extraction when page loads
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initExtraction);
+} else {
+  initExtraction();
+}
+
+// Re-extract when navigation occurs
 let lastUrl = window.location.href;
-setInterval(() => {
-  if (window.location.href !== lastUrl) {
-    lastUrl = window.location.href;
-    console.log('Page changed, re-detecting...');
-    detector.detectPageType();
-    detector.detectCourseInfo();
+new MutationObserver(() => {
+  const url = window.location.href;
+  if (url !== lastUrl) {
+    lastUrl = url;
+    console.log('🔄 URL changed, re-extracting...');
+    initExtraction();
   }
-}, 1000);
+}).observe(document, { subtree: true, childList: true });
+
+console.log('✅ Brightspace GPT content script ready');

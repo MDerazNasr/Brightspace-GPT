@@ -96,14 +96,14 @@
     <div id="pageInfo" class="quick-test">
       Detecting current page...
     </div>
-    <button id="detectPageBtn" onclick="detectCurrentPage()">
+    <button id="detectPageBtn">
       Refresh Page Detection
     </button>
   </div>
 
   <div class="test-section">
     <h4>📊 Data Extraction Test</h4>
-    <button id="extractDataBtn" onclick="testDataExtraction()">
+    <button id="extractDataBtn">
       Extract Current Page Data
     </button>
     <div id="extractedData" class="data-display" style="display: none;">
@@ -112,7 +112,7 @@
 
   <div class="test-section">
     <h4>🔗 Backend Connection</h4>
-    <button id="testBackendBtn" onclick="testBackendConnection()">
+    <button id="testBackendBtn">
       Test Backend Connection
     </button>
     <div id="backendStatus" class="quick-test" style="display: none;">
@@ -122,10 +122,22 @@
   <div class="test-section">
     <h4>💬 Quick Test Chat</h4>
     <input type="text" id="testQuery" placeholder="Ask about your courses..." style="width: 100%; padding: 5px; margin: 5px 0;">
-    <button id="sendTestBtn" onclick="sendTestQuery()">
+    <button id="sendTestBtn">
       Send Test Query
     </button>
     <div id="testResponse" class="data-display" style="display: none;">
+    </div>
+  </div>
+
+  <div class="test-section">
+    <h4>🔄 Auto-Sync Courses</h4>
+    <div id="syncStatus" class="quick-test">
+      Not synced yet
+    </div>
+    <button id="syncAllBtn">
+      Sync All My Courses
+    </button>
+    <div id="syncProgress" class="data-display" style="display: none;">
     </div>
   </div>
 

@@ -1,39 +1,25 @@
 {
   "manifest_version": 3,
-  "name": "uOttawa Brightspace Assistant",
-  "version": "0.1.0",
-  "description": "AI assistant for uOttawa Brightspace - Phase 1 Development",
-  
+  "name": "Brightspace GPT",
+  "version": "1.0.0",
+  "description": "AI-powered assistant for University of Ottawa Brightspace",
   "permissions": [
     "activeTab",
-    "storage"
+    "storage",
+    "tabs"
   ],
-  
   "host_permissions": [
     "https://uottawa.brightspace.com/*",
     "http://localhost:8001/*"
   ],
-  
+  "action": {
+    "default_popup": "popup/popup.html"
+  },
   "content_scripts": [
     {
       "matches": ["https://uottawa.brightspace.com/*"],
       "js": ["content-scripts/brightspace-detector.js"],
       "run_at": "document_idle"
     }
-  ],
-  
-  "background": {
-    "service_worker": "background/background.js"
-  },
-  
-  "action": {
-    "default_popup": "popup/popup.html",
-    "default_title": "uOttawa Brightspace Assistant"
-  },
-  
-  "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png", 
-    "128": "icons/icon128.png"
-  }
+  ]
 }

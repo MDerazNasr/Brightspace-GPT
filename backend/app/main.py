@@ -1,119 +1,44 @@
 # backend/app/main.py
-"""
-uOttawa Brightspace LLM Assistant - Main Application
-"""
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from app.api import chat, health
 
-# Import configuration
-try:
-    from app.core.config import settings
-except ImportError:
-    class Settings:
-        DEBUG = True
-        CORS_ORIGINS = ["http://localhost:3000"]
-        ENVIRONMENT = "development"
-    settings = Settings()
-
-# Import database init
-try:
-    from app.core.database import init_db
-except ImportError:
-    async def init_db():
-        print("Database initialization skipped - module not found")
-        pass
-
-# Import API routers
-try:
-    from app.api import health
-except ImportError:
-    health = None
-
-try:
-    from app.api import auth
-except ImportError:
-    auth = None
-
-try:
-    from app.api import extension
-except ImportError:
-    extension = None
-
-# CREATE THE APP FIRST - This is the key fix!
+# Create FastAPI app
 app = FastAPI(
-    title="uOttawa Brightspace Assistant",
-    description="AI-powered assistant for uOttawa Brightspace courses",
-    version="1.0.0",
-    docs_url="/docs" if getattr(settings, 'DEBUG', True) else None,
-    redoc_url="/redoc" if getattr(settings, 'DEBUG', True) else None,
+    title="Brightspace GPT API",
+    description="AI-powered assistant for University of Ottawa Brightspace",
+    version="1.0.0"
 )
 
-# Add security middleware
-app.add_middleware(
-    TrustedHostMiddleware, 
-    allowed_hosts=["localhost", "127.0.0.1", "assistant.uottawa.ca", "*"]
-)
-
-# Add CORS middleware
+# Configure CORS to allow Chrome extension
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=getattr(settings, 'CORS_ORIGINS', ["*"]),
+    allow_origins=[
+        "chrome-extension://*",  # Allow all Chrome extensions
+        "http://localhost:*",    # Allow local development
+        "http://127.0.0.1:*",
+    ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# NOW include routers (after app is created)
-if health:
-    app.include_router(health.router, prefix="/api/health", tags=["Health"])
-    print("✅ Included health router")
-
-if auth:
-    app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
-    print("✅ Included auth router")
-
-if extension:
-    app.include_router(extension.router, prefix="/api/extension", tags=["Extension"])
-    print("✅ Included extension router")
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize application on startup."""
-    print("⚠️ Skipping database initialization for extension testing")
-    # Database not needed for Phase 1 extension testing
-    # Uncomment below when ready to use database features
-    # try:
-    #     await init_db()
-    #     print("✅ Database initialized")
-    # except Exception as e:
-    #     print(f"⚠️ Database initialization failed: {e}")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on application shutdown."""
-    pass
+# Include routers
+app.include_router(health.router, prefix="/api/health", tags=["health"])
+app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 
 @app.get("/")
 async def root():
-    """Root endpoint."""
+    """
+    Root endpoint
+    """
     return {
-        "message": "uOttawa Brightspace LLM Assistant API",
+        "message": "Brightspace GPT API",
         "version": "1.0.0",
-        "status": "running",
-        "environment": getattr(settings, 'ENVIRONMENT', 'unknown')
+        "status": "running"
     }
-
-@app.get("/test")
-async def test_endpoint():
-    """Simple test endpoint."""
-    return {"test": "success", "message": "API is working!"}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=8001,
-        reload=getattr(settings, 'DEBUG', True)
-    )
+    uvicorn.run(app, host="0.0.0.0", port=8001)
