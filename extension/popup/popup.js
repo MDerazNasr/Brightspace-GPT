@@ -14,6 +14,9 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('testBackendBtn').addEventListener('click', testBackendConnection);
   document.getElementById('sendTestBtn').addEventListener('click', sendTestQuery);
   document.getElementById('syncAllBtn').addEventListener('click', syncAllCourses);
+  document.getElementById('fetchGradesBtn').addEventListener('click', fetchAllGrades);
+  document.getElementById('fetchAssignmentsBtn').addEventListener('click', fetchAllAssignments);
+  document.getElementById('fetchAnnouncementsBtn').addEventListener('click', fetchAllAnnouncements);
   
   // Initialize
   checkInitialStatus();
@@ -233,10 +236,19 @@ function sendTestQuery() {
   responseDiv.innerHTML = 'Waiting for AI response...';
   
   // Get stored course data
-  chrome.storage.local.get(['brightspace_courses', 'latest_extracted_data'], function(stored) {
+  chrome.storage.local.get([
+    'brightspace_courses',
+    'latest_extracted_data',
+    'brightspace_grades',
+    'brightspace_assignments',
+    'brightspace_announcements'
+  ], function(stored) {
     const context = {
       courses: stored.brightspace_courses || [],
-      currentPage: stored.latest_extracted_data || {}
+      currentPage: stored.latest_extracted_data || {},
+      grades: stored.brightspace_grades || [],
+      assignments: stored.brightspace_assignments || [],
+      announcements: stored.brightspace_announcements || []
     };
     
     console.log('📤 Sending query:', query);
@@ -416,6 +428,193 @@ function syncAllCourses() {
         });
       });
     }, 3000); // Wait 3 seconds for Shadow DOM to fully render
+  });
+}
+
+/**
+ * Fetch all grades from Brightspace API
+ */
+function fetchAllGrades() {
+  console.log('📊 Fetching all grades...');
+  const btn = document.getElementById('fetchGradesBtn');
+  const dataDiv = document.getElementById('gradesData');
+  
+  btn.disabled = true;
+  btn.textContent = 'Fetching...';
+  dataDiv.style.display = 'block';
+  dataDiv.innerHTML = 'Fetching grades from all courses...';
+  
+  chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+    const tab = tabs[0];
+    
+    if (!tab.url.includes('brightspace.com')) {
+      dataDiv.innerHTML = '❌ Please navigate to Brightspace first';
+      btn.disabled = false;
+      btn.textContent = 'Fetch All Grades';
+      return;
+    }
+    
+    chrome.tabs.sendMessage(tab.id, { action: 'fetchAllGrades' }, function(result) {
+      if (chrome.runtime.lastError) {
+        console.error('❌ Error:', chrome.runtime.lastError);
+        dataDiv.innerHTML = `❌ Error: ${chrome.runtime.lastError.message}`;
+        btn.disabled = false;
+        btn.textContent = 'Fetch All Grades';
+        return;
+      }
+      
+      const grades = result.grades || [];
+      console.log('📊 Grades:', grades);
+      
+      let html = `<strong>✅ Fetched grades for ${grades.length} courses:</strong><br><br>`;
+      
+      grades.forEach(courseGrades => {
+        if (courseGrades.grades && courseGrades.grades.length > 0) {
+          html += `<strong>${courseGrades.courseCode}</strong> - ${courseGrades.courseName}<br>`;
+          courseGrades.grades.forEach(grade => {
+            html += `  • ${grade.name}: ${grade.displayedGrade || 'N/A'}<br>`;
+          });
+          html += '<br>';
+        }
+      });
+      
+      dataDiv.innerHTML = html;
+      
+      // Store grades
+      chrome.storage.local.set({
+        'brightspace_grades': grades,
+        'last_grades_fetch': new Date().toISOString()
+      });
+      
+      btn.disabled = false;
+      btn.textContent = 'Fetch All Grades';
+    });
+  });
+}
+
+/**
+ * Fetch all assignments from Brightspace API
+ */
+function fetchAllAssignments() {
+  console.log('📝 Fetching all assignments...');
+  const btn = document.getElementById('fetchAssignmentsBtn');
+  const dataDiv = document.getElementById('assignmentsData');
+  
+  btn.disabled = true;
+  btn.textContent = 'Fetching...';
+  dataDiv.style.display = 'block';
+  dataDiv.innerHTML = 'Fetching assignments from all courses...';
+  
+  chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+    const tab = tabs[0];
+    
+    if (!tab.url.includes('brightspace.com')) {
+      dataDiv.innerHTML = '❌ Please navigate to Brightspace first';
+      btn.disabled = false;
+      btn.textContent = 'Fetch All Assignments';
+      return;
+    }
+    
+    chrome.tabs.sendMessage(tab.id, { action: 'fetchAllAssignments' }, function(result) {
+      if (chrome.runtime.lastError) {
+        console.error('❌ Error:', chrome.runtime.lastError);
+        dataDiv.innerHTML = `❌ Error: ${chrome.runtime.lastError.message}`;
+        btn.disabled = false;
+        btn.textContent = 'Fetch All Assignments';
+        return;
+      }
+      
+      const assignments = result.assignments || [];
+      console.log('📝 Assignments:', assignments);
+      
+      let html = `<strong>✅ Fetched assignments for ${assignments.length} courses:</strong><br><br>`;
+      
+      assignments.forEach(courseAssignments => {
+        if (courseAssignments.assignments && courseAssignments.assignments.length > 0) {
+          html += `<strong>${courseAssignments.courseCode}</strong><br>`;
+          courseAssignments.assignments.forEach(assignment => {
+            html += `  • ${assignment.name}`;
+            if (assignment.dueDate) {
+              html += ` - Due: ${new Date(assignment.dueDate).toLocaleDateString()}`;
+            }
+            html += '<br>';
+          });
+          html += '<br>';
+        }
+      });
+      
+      dataDiv.innerHTML = html;
+      
+      // Store assignments
+      chrome.storage.local.set({
+        'brightspace_assignments': assignments,
+        'last_assignments_fetch': new Date().toISOString()
+      });
+      
+      btn.disabled = false;
+      btn.textContent = 'Fetch All Assignments';
+    });
+  });
+}
+
+/**
+ * Fetch all announcements from Brightspace API
+ */
+function fetchAllAnnouncements() {
+  console.log('📢 Fetching all announcements...');
+  const btn = document.getElementById('fetchAnnouncementsBtn');
+  const dataDiv = document.getElementById('announcementsData');
+  
+  btn.disabled = true;
+  btn.textContent = 'Fetching...';
+  dataDiv.style.display = 'block';
+  dataDiv.innerHTML = 'Fetching announcements from all courses...';
+  
+  chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+    const tab = tabs[0];
+    
+    if (!tab.url.includes('brightspace.com')) {
+      dataDiv.innerHTML = '❌ Please navigate to Brightspace first';
+      btn.disabled = false;
+      btn.textContent = 'Fetch All Announcements';
+      return;
+    }
+    
+    chrome.tabs.sendMessage(tab.id, { action: 'fetchAllAnnouncements' }, function(result) {
+      if (chrome.runtime.lastError) {
+        console.error('❌ Error:', chrome.runtime.lastError);
+        dataDiv.innerHTML = `❌ Error: ${chrome.runtime.lastError.message}`;
+        btn.disabled = false;
+        btn.textContent = 'Fetch All Announcements';
+        return;
+      }
+      
+      const announcements = result.announcements || [];
+      console.log('📢 Announcements:', announcements);
+      
+      let html = `<strong>✅ Fetched announcements for ${announcements.length} courses:</strong><br><br>`;
+      
+      announcements.forEach(courseAnnouncements => {
+        if (courseAnnouncements.announcements && courseAnnouncements.announcements.length > 0) {
+          html += `<strong>${courseAnnouncements.courseCode}</strong><br>`;
+          courseAnnouncements.announcements.slice(0, 3).forEach(announcement => {
+            html += `  • ${announcement.title}<br>`;
+          });
+          html += '<br>';
+        }
+      });
+      
+      dataDiv.innerHTML = html;
+      
+      // Store announcements
+      chrome.storage.local.set({
+        'brightspace_announcements': announcements,
+        'last_announcements_fetch': new Date().toISOString()
+      });
+      
+      btn.disabled = false;
+      btn.textContent = 'Fetch All Announcements';
+    });
   });
 }
 

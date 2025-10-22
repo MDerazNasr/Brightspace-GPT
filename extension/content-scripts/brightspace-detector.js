@@ -1,5 +1,5 @@
 // content-scripts/brightspace-detector.js
-// Complete version using Brightspace API (more reliable than Shadow DOM)
+// Complete version using Brightspace API (Phase 2)
 
 console.log('🎓 Brightspace GPT content script loaded');
 
@@ -35,145 +35,216 @@ class BrightspaceExtractor {
         endDate: item.OrgUnit.EndDate || null
       }));
       
-      // Filter to only active courses (optional)
-      // const activeCourses = courses.filter(c => c.isActive);
-      
       this.courses = courses;
       console.log(`✅ Extracted ${courses.length} courses via API`);
       return courses;
       
     } catch (error) {
       console.error('❌ API extraction failed:', error);
-      console.log('⚠️ Falling back to Shadow DOM extraction...');
-      // Fallback to Shadow DOM method
-      return this.extractCoursesViaShadowDOM();
+      return [];
     }
   }
 
   /**
-   * Extract courses from Shadow DOM (FALLBACK - has timing issues)
-   */
-  async extractCoursesViaShadowDOM() {
-    return new Promise((resolve) => {
-      const maxRetries = 10;
-      let attempt = 0;
-      
-      const tryExtract = () => {
-        try {
-          attempt++;
-          console.log(`🔄 Shadow DOM extraction attempt ${attempt}/${maxRetries}`);
-          
-          const courses = [];
-          
-          const myCoursesWidget = document.querySelector('d2l-my-courses');
-          if (!myCoursesWidget?.shadowRoot) {
-            console.log('❌ d2l-my-courses not found');
-            if (attempt < maxRetries) {
-              setTimeout(tryExtract, 1000);
-              return;
-            }
-            resolve([]);
-            return;
-          }
-          
-          const container = myCoursesWidget.shadowRoot.querySelector('d2l-my-courses-container');
-          if (!container?.shadowRoot) {
-            console.log('❌ d2l-my-courses-container not found');
-            if (attempt < maxRetries) {
-              setTimeout(tryExtract, 1000);
-              return;
-            }
-            resolve([]);
-            return;
-          }
-          
-          const contentPanels = container.shadowRoot.querySelectorAll('d2l-my-courses-content');
-          console.log(`✅ Found ${contentPanels.length} content panels`);
-          
-          let foundDataInAnyPanel = false;
-          
-          contentPanels.forEach((panel, panelIndex) => {
-            if (!panel.shadowRoot) return;
-            
-            const cardGrid = panel.shadowRoot.querySelector('d2l-my-courses-card-grid');
-            if (!cardGrid?.shadowRoot) return;
-            
-            const enrollmentCards = cardGrid.shadowRoot.querySelectorAll('d2l-enrollment-card');
-            
-            enrollmentCards.forEach((card) => {
-              try {
-                const org = card._organization;
-                const enrollment = card._enrollment;
-                
-                if (!org || !org.properties) {
-                  return;
-                }
-                
-                foundDataInAnyPanel = true;
-                
-                const courseData = {
-                  name: org.properties.name || 'Unknown Course',
-                  code: org.properties.code || 'N/A',
-                  orgUnitId: org.properties.orgUnitId || null,
-                  homepage: org._linksByRel?.['https://api.brightspace.com/rels/organization-homepage']?.[0]?.href,
-                  gradesUrl: enrollment?.links?.find(link => link.rel?.includes('user-course-grades'))?.href,
-                  finalGradeUrl: enrollment?.links?.find(link => link.rel?.includes('user-final-grade'))?.href,
-                  startDate: org.properties.startDate || null,
-                  endDate: org.properties.endDate || null,
-                  isActive: org.properties.isActive !== false
-                };
-                
-                courses.push(courseData);
-              } catch (error) {
-                console.error(`❌ Error extracting card:`, error);
-              }
-            });
-          });
-          
-          if (courses.length > 0) {
-            console.log(`✅ Shadow DOM extracted ${courses.length} courses`);
-            this.courses = courses;
-            resolve(courses);
-          } else if (foundDataInAnyPanel) {
-            console.log(`⚠️ Found data but extracted 0 courses`);
-            if (attempt < maxRetries) {
-              setTimeout(tryExtract, 1000);
-            } else {
-              resolve([]);
-            }
-          } else {
-            console.log(`⏳ No course data loaded yet (attempt ${attempt}/${maxRetries})`);
-            if (attempt < maxRetries) {
-              setTimeout(tryExtract, 1000);
-            } else {
-              console.log('❌ Gave up after', maxRetries, 'attempts');
-              resolve([]);
-            }
-          }
-          
-        } catch (error) {
-          console.error('❌ Error in Shadow DOM extraction:', error);
-          if (attempt < maxRetries) {
-            setTimeout(tryExtract, 1000);
-          } else {
-            resolve([]);
-          }
-        }
-      };
-      
-      tryExtract();
-    });
-  }
-
-  /**
-   * Main extraction method - tries API first, falls back to Shadow DOM
+   * Main extraction method
    */
   async extractCourses() {
     return this.extractCoursesViaAPI();
   }
 
   /**
-   * Extract grades from grades page
+   * Fetch grades for a specific course via API
+   */
+  async fetchCourseGrades(orgUnitId) {
+    try {
+      console.log(`📊 Fetching grades for course ${orgUnitId}...`);
+      const response = await fetch(`https://uottawa.brightspace.com/d2l/api/le/1.43/${orgUnitId}/grades/values/myGradeValues/`);
+      
+      if (!response.ok) {
+        throw new Error(`Grades API returned ${response.status}`);
+      }
+      
+      const data = await response.json();
+      console.log(`✅ Fetched ${data.length} grade items`);
+      
+      return {
+        orgUnitId,
+        grades: data.map(item => ({
+          name: item.GradeObjectName,
+          displayedGrade: item.DisplayedGrade,
+          pointsNumerator: item.PointsNumerator,
+          pointsDenominator: item.PointsDenominator,
+          weightedNumerator: item.WeightedNumerator,
+          weightedDenominator: item.WeightedDenominator
+        }))
+      };
+      
+    } catch (error) {
+      console.error(`❌ Error fetching grades for ${orgUnitId}:`, error);
+      return { orgUnitId, error: error.message, grades: [] };
+    }
+  }
+
+  /**
+   * Fetch grades for all courses
+   */
+  async fetchAllGrades() {
+    try {
+      console.log('📊 Fetching grades for all courses...');
+      const courses = await this.extractCourses();
+      
+      const gradesPromises = courses
+        .filter(c => c.isActive)
+        .map(c => this.fetchCourseGrades(c.orgUnitId));
+      
+      const allGrades = await Promise.all(gradesPromises);
+      
+      const gradesWithCourseNames = allGrades.map(gradeData => {
+        const course = courses.find(c => c.orgUnitId === gradeData.orgUnitId);
+        return {
+          ...gradeData,
+          courseName: course?.name,
+          courseCode: course?.code
+        };
+      });
+      
+      console.log(`✅ Fetched grades for ${gradesWithCourseNames.length} courses`);
+      return gradesWithCourseNames;
+      
+    } catch (error) {
+      console.error('❌ Error fetching all grades:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Fetch assignments for a specific course via API
+   */
+  async fetchCourseAssignments(orgUnitId) {
+    try {
+      console.log(`📝 Fetching assignments for course ${orgUnitId}...`);
+      const response = await fetch(`https://uottawa.brightspace.com/d2l/api/le/1.43/${orgUnitId}/dropbox/folders/`);
+      
+      if (!response.ok) {
+        throw new Error(`Assignments API returned ${response.status}`);
+      }
+      
+      const data = await response.json();
+      console.log(`✅ Fetched ${data.length} assignment folders`);
+      
+      return {
+        orgUnitId,
+        assignments: data.map(item => ({
+          name: item.Name,
+          id: item.Id,
+          dueDate: item.DueDate,
+          isHidden: item.IsHidden
+        }))
+      };
+      
+    } catch (error) {
+      console.error(`❌ Error fetching assignments for ${orgUnitId}:`, error);
+      return { orgUnitId, error: error.message, assignments: [] };
+    }
+  }
+
+  /**
+   * Fetch assignments for all courses
+   */
+  async fetchAllAssignments() {
+    try {
+      console.log('📝 Fetching assignments for all courses...');
+      const courses = await this.extractCourses();
+      
+      const assignmentsPromises = courses
+        .filter(c => c.isActive)
+        .map(c => this.fetchCourseAssignments(c.orgUnitId));
+      
+      const allAssignments = await Promise.all(assignmentsPromises);
+      
+      const assignmentsWithCourseNames = allAssignments.map(assignmentData => {
+        const course = courses.find(c => c.orgUnitId === assignmentData.orgUnitId);
+        return {
+          ...assignmentData,
+          courseName: course?.name,
+          courseCode: course?.code
+        };
+      });
+      
+      console.log(`✅ Fetched assignments for ${assignmentsWithCourseNames.length} courses`);
+      return assignmentsWithCourseNames;
+      
+    } catch (error) {
+      console.error('❌ Error fetching all assignments:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Fetch announcements for a specific course via API
+   */
+  async fetchCourseAnnouncements(orgUnitId) {
+    try {
+      console.log(`📢 Fetching announcements for course ${orgUnitId}...`);
+      const response = await fetch(`https://uottawa.brightspace.com/d2l/api/le/1.43/${orgUnitId}/news/`);
+      
+      if (!response.ok) {
+        throw new Error(`Announcements API returned ${response.status}`);
+      }
+      
+      const data = await response.json();
+      console.log(`✅ Fetched ${data.length} announcements`);
+      
+      return {
+        orgUnitId,
+        announcements: data.map(item => ({
+          title: item.Title,
+          body: item.Body?.Text || '',
+          publishDate: item.PublishedDate,
+          isPublished: item.IsPublished
+        }))
+      };
+      
+    } catch (error) {
+      console.error(`❌ Error fetching announcements for ${orgUnitId}:`, error);
+      return { orgUnitId, error: error.message, announcements: [] };
+    }
+  }
+
+  /**
+   * Fetch announcements for all courses
+   */
+  async fetchAllAnnouncements() {
+    try {
+      console.log('📢 Fetching announcements for all courses...');
+      const courses = await this.extractCourses();
+      
+      const announcementsPromises = courses
+        .filter(c => c.isActive)
+        .map(c => this.fetchCourseAnnouncements(c.orgUnitId));
+      
+      const allAnnouncements = await Promise.all(announcementsPromises);
+      
+      const announcementsWithCourseNames = allAnnouncements.map(announcementData => {
+        const course = courses.find(c => c.orgUnitId === announcementData.orgUnitId);
+        return {
+          ...announcementData,
+          courseName: course?.name,
+          courseCode: course?.code
+        };
+      });
+      
+      console.log(`✅ Fetched announcements for ${announcementsWithCourseNames.length} courses`);
+      return announcementsWithCourseNames;
+      
+    } catch (error) {
+      console.error('❌ Error fetching all announcements:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Extract grades from grades page (fallback)
    */
   extractGrades() {
     const grades = [];
@@ -211,7 +282,7 @@ class BrightspaceExtractor {
   }
 
   /**
-   * Extract announcements
+   * Extract announcements (fallback)
    */
   extractAnnouncements() {
     const announcements = [];
@@ -247,7 +318,7 @@ class BrightspaceExtractor {
   }
 
   /**
-   * Extract assignments
+   * Extract assignments (fallback)
    */
   extractAssignments() {
     const assignments = [];
@@ -360,7 +431,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       console.log('✅ Data extracted:', data);
       sendResponse(data);
     });
-    return true; // Keep channel open for async
+    return true;
   }
   
   if (request.action === 'extractCourses') {
@@ -369,7 +440,34 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       console.log('✅ Courses extracted:', courses.length);
       sendResponse({ courses });
     });
-    return true; // Keep channel open for async
+    return true;
+  }
+  
+  if (request.action === 'fetchAllGrades') {
+    console.log('📊 Fetching all grades...');
+    extractor.fetchAllGrades().then(grades => {
+      console.log('✅ Grades fetched');
+      sendResponse({ grades });
+    });
+    return true;
+  }
+  
+  if (request.action === 'fetchAllAssignments') {
+    console.log('📝 Fetching all assignments...');
+    extractor.fetchAllAssignments().then(assignments => {
+      console.log('✅ Assignments fetched');
+      sendResponse({ assignments });
+    });
+    return true;
+  }
+  
+  if (request.action === 'fetchAllAnnouncements') {
+    console.log('📢 Fetching all announcements...');
+    extractor.fetchAllAnnouncements().then(announcements => {
+      console.log('✅ Announcements fetched');
+      sendResponse({ announcements });
+    });
+    return true;
   }
   
   return true;
@@ -387,7 +485,7 @@ function initExtraction() {
         'brightspace_courses': data.courses || []
       });
     }
-  }, 3000); // Wait 3 seconds for page to settle
+  }, 3000);
 }
 
 // Run extraction when page loads

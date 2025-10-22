@@ -3,6 +3,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
+from app.services.mistral_service import get_mistral_service
 
 router = APIRouter()
 
@@ -39,6 +40,9 @@ async def chat_query(request: ChatRequest):
         # Extract context
         courses = request.context.get('courses', [])
         current_page = request.context.get('currentPage', {})
+        grades = request.context.get('grades', [])
+        assignments = request.context.get('assignments', [])
+        announcements = request.context.get('announcements', [])
         
         print(f"📥 Received query: {request.query}")
         print(f"📚 Context: {len(courses)} courses")
@@ -62,31 +66,43 @@ async def chat_query(request: ChatRequest):
                     response_text += "\n"
         
         elif 'grade' in query_lower:
-            # Check if we have grades URLs from synced courses
-            grades_info = []
-            for course in courses:
-                if course.get('gradesUrl'):
-                    grades_info.append({
-                        'course': course['name'],
-                        'gradesUrl': course['gradesUrl']
-                    })
-            
-            if grades_info:
-                response_text = f"I found grade information for {len(grades_info)} courses:\n\n"
-                for info in grades_info:
-                    response_text += f"• {info['course']}\n"
-                response_text += "\n📊 To see actual grade values, navigate to a course's grades page and I can extract the visible grades.\n\n"
-                response_text += "In the future, I'll be able to fetch grades directly using the Brightspace API!"
+            if len(grades) > 0:
+                response_text = "Here are your grades:\n\n"
+                for course_grades in grades:
+                    if course_grades.get('grades') and len(course_grades['grades']) > 0:
+                        response_text += f"**{course_grades.get('courseCode', 'Unknown')}**:\n"
+                        for grade in course_grades['grades'][:5]:  # Show first 5
+                            response_text += f"  • {grade['name']}: {grade.get('displayedGrade', 'N/A')}\n"
+                        response_text += "\n"
             else:
-                response_text = "I don't have grades data yet. Please sync your courses first, then navigate to a course's grades page so I can extract the information."
+                response_text = "I don't have your grades data yet. Click 'Fetch All Grades' to load them."
         
         elif 'assignment' in query_lower or 'due' in query_lower:
-            response_text = "To see your assignments and due dates, please navigate to a course's assignments or dropbox page, and I can extract them for you.\n\n"
-            response_text += "In the future, I'll be able to fetch all assignments across all your courses automatically!"
+            if len(assignments) > 0:
+                response_text = "Here are your upcoming assignments:\n\n"
+                for course_assignments in assignments:
+                    if course_assignments.get('assignments') and len(course_assignments['assignments']) > 0:
+                        response_text += f"**{course_assignments.get('courseCode', 'Unknown')}**:\n"
+                        for assignment in course_assignments['assignments'][:3]:  # Show first 3
+                            response_text += f"  • {assignment['name']}"
+                            if assignment.get('dueDate'):
+                                response_text += f" - Due: {assignment['dueDate'][:10]}"
+                            response_text += "\n"
+                        response_text += "\n"
+            else:
+                response_text = "I don't have your assignments data yet. Click 'Fetch All Assignments' to load them."
         
         elif 'announcement' in query_lower or 'news' in query_lower:
-            response_text = "To see announcements, please navigate to a course's news/announcements page and I can show you the latest updates.\n\n"
-            response_text += "I'm working on being able to fetch all announcements automatically!"
+            if len(announcements) > 0:
+                response_text = "Here are recent announcements:\n\n"
+                for course_announcements in announcements:
+                    if course_announcements.get('announcements') and len(course_announcements['announcements']) > 0:
+                        response_text += f"**{course_announcements.get('courseCode', 'Unknown')}**:\n"
+                        for announcement in course_announcements['announcements'][:2]:  # Show first 2
+                            response_text += f"  • {announcement['title']}\n"
+                        response_text += "\n"
+            else:
+                response_text = "I don't have your announcements data yet. Click 'Fetch All Announcements' to load them."
         
         elif 'help' in query_lower or 'what can you do' in query_lower:
             response_text = "I'm your Brightspace assistant! Here's what I can help with:\n\n"
