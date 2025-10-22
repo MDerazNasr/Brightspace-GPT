@@ -1,12 +1,15 @@
 # backend/app/services/mistral_service.py
 
 from mistralai import Mistral
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class MistralService:
     """
-    Service for interacting with Mistral AI LLM
+    Service for interacting with Mistral AI LLM with smart filtering and context management
     """
     
     def __init__(self):
@@ -15,25 +18,175 @@ class MistralService:
             raise ValueError("MISTRAL_API_KEY environment variable not set")
         
         self.client = Mistral(api_key=api_key)
-        self.model = "mistral-small-latest"  # Fast and cost-effective
-        # Alternative: "mistral-medium-latest" for better quality
-        # Alternative: "mistral-large-latest" for best quality
+        # Use mistral-small for cost-effectiveness, or switch to mistral-large for better quality
+        self.model = os.getenv('MISTRAL_MODEL', "open-mistral-7b")
+        logger.info(f"🤖 Initialized Mistral service with model: {self.model}")
+    
+    def filter_relevant_data(self, query: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Pre-filter context to only include data relevant to the query.
+        This reduces token usage and improves response quality.
+        """
+        query_lower = query.lower()
+        filtered_context = {}
+        
+        # Extract course-specific queries (e.g., "CSI2532", "MAT2777")
+        mentioned_courses = self._extract_course_codes(query_lower, context.get('courses', []))
+        
+        # Filter courses
+        courses = context.get('courses', [])
+        if mentioned_courses:
+            # Only include mentioned courses
+            filtered_context['courses'] = [
+                c for c in courses 
+                if any(code.lower() in c.get('code', '').lower() or 
+                       code.lower() in c.get('name', '').lower() 
+                       for code in mentioned_courses)
+            ]
+            logger.info(f"📊 Filtered to {len(filtered_context['courses'])} relevant courses")
+        elif 'course' in query_lower or 'class' in query_lower:
+            # Show all courses if asking generally
+            filtered_context['courses'] = courses[:20]  # Limit to 20 most recent
+        else:
+            # Include minimal course info for context
+            filtered_context['courses'] = courses[:5]
+        
+        # Filter grades
+        grades = context.get('grades', [])
+        if 'grade' in query_lower or 'mark' in query_lower or 'score' in query_lower:
+            if mentioned_courses:
+                filtered_context['grades'] = [
+                    g for g in grades 
+                    if any(code.lower() in g.get('courseCode', '').lower() 
+                           for code in mentioned_courses)
+                ]
+            else:
+                filtered_context['grades'] = grades[:10]  # Limit to 10 courses
+        elif mentioned_courses:
+            # Include grades for mentioned courses even if not explicitly asked
+            filtered_context['grades'] = [
+                g for g in grades 
+                if any(code.lower() in g.get('courseCode', '').lower() 
+                       for code in mentioned_courses)
+            ]
+        
+        # Filter assignments
+        assignments = context.get('assignments', [])
+        if 'assignment' in query_lower or 'due' in query_lower or 'deadline' in query_lower:
+            if mentioned_courses:
+                filtered_context['assignments'] = [
+                    a for a in assignments 
+                    if any(code.lower() in a.get('courseCode', '').lower() 
+                           for code in mentioned_courses)
+                ]
+            elif 'upcoming' in query_lower or 'soon' in query_lower or 'week' in query_lower:
+                # Filter to upcoming assignments only
+                filtered_context['assignments'] = self._filter_upcoming_assignments(assignments)
+            else:
+                filtered_context['assignments'] = assignments[:10]
+        
+        # Filter announcements
+        announcements = context.get('announcements', [])
+        if 'announcement' in query_lower or 'news' in query_lower or 'latest' in query_lower:
+            if mentioned_courses:
+                filtered_context['announcements'] = [
+                    a for a in announcements 
+                    if any(code.lower() in a.get('courseCode', '').lower() 
+                           for code in mentioned_courses)
+                ]
+            elif 'latest' in query_lower or 'recent' in query_lower:
+                # Only show most recent 5 announcements
+                all_announcements = []
+                for course_ann in announcements:
+                    if course_ann.get('announcements'):
+                        all_announcements.extend([
+                            {**ann, 'courseCode': course_ann.get('courseCode')}
+                            for ann in course_ann['announcements']
+                        ])
+                # Sort by date and take top 5
+                all_announcements.sort(key=lambda x: x.get('publishDate', ''), reverse=True)
+                filtered_context['announcements'] = all_announcements[:5]
+            else:
+                filtered_context['announcements'] = announcements[:5]
+        
+        # Log filtering results
+        total_items = sum(len(v) if isinstance(v, list) else 1 for v in filtered_context.values())
+        logger.info(f"📉 Filtered context: {total_items} items from {len(courses) + len(grades) + len(assignments) + len(announcements)} total")
+        
+        return filtered_context
+    
+    def _extract_course_codes(self, query: str, courses: List[Dict]) -> List[str]:
+        """
+        Extract course codes mentioned in the query.
+        Examples: CSI2532, MAT2777, ITI1121
+        """
+        import re
+        
+        # Pattern for course codes (3-4 letters followed by 4 digits)
+        pattern = r'\b[A-Z]{3,4}\d{4}\b'
+        matches = re.findall(pattern, query.upper())
+        
+        # Also check for partial matches in course names
+        query_words = query.split()
+        for word in query_words:
+            word_upper = word.upper()
+            for course in courses:
+                course_name = course.get('name', '')
+                course_code = course.get('code', '')
+                # Extract friendly code (e.g., "CSI2532" from "CSI2532[A] Bases de données...")
+                friendly_code = course_name.split('[')[0].strip()
+                
+                if word_upper in course_code.upper() or word_upper in friendly_code.upper():
+                    matches.append(friendly_code)
+        
+        return list(set(matches))  # Remove duplicates
+    
+    def _filter_upcoming_assignments(self, assignments: List[Dict], days: int = 14) -> List[Dict]:
+        """
+        Filter assignments to only upcoming ones in the next N days.
+        """
+        from datetime import datetime, timedelta
+        
+        upcoming = []
+        cutoff_date = datetime.now() + timedelta(days=days)
+        
+        for course_assignments in assignments:
+            if not course_assignments.get('assignments'):
+                continue
+                
+            filtered_assignments = []
+            for assignment in course_assignments['assignments']:
+                due_date_str = assignment.get('dueDate')
+                if due_date_str:
+                    try:
+                        due_date = datetime.fromisoformat(due_date_str.replace('Z', '+00:00'))
+                        if datetime.now() <= due_date <= cutoff_date:
+                            filtered_assignments.append(assignment)
+                    except:
+                        pass  # Skip if date parsing fails
+            
+            if filtered_assignments:
+                upcoming.append({
+                    **course_assignments,
+                    'assignments': filtered_assignments
+                })
+        
+        return upcoming
     
     def build_system_prompt(self, context: Dict[str, Any]) -> str:
         """
-        Build a comprehensive system prompt with all user context
+        Build a comprehensive system prompt with filtered context.
         """
         courses = context.get('courses', [])
         grades = context.get('grades', [])
         assignments = context.get('assignments', [])
         announcements = context.get('announcements', [])
         
-        # Build a mapping of orgUnitId to course info for easy lookup
+        # Build a mapping of orgUnitId to course info
         course_map = {}
         for course in courses:
             org_id = course.get('orgUnitId')
             if org_id:
-                # Extract friendly course code from name (e.g., "CSI2532" from "CSI2532[A] Bases de données...")
                 name = course.get('name', '')
                 friendly_code = name.split('[')[0].strip() if '[' in name else course.get('code', '')
                 course_map[org_id] = {
@@ -42,121 +195,120 @@ class MistralService:
                     'fullCode': course.get('code', '')
                 }
         
-        prompt = """You are an AI assistant for University of Ottawa students using Brightspace. 
-You help students with their courses, grades, assignments, and announcements.
+        prompt = """You are a helpful AI assistant for University of Ottawa students using Brightspace.
+You help students understand their courses, grades, assignments, and announcements.
 
-CRITICAL FILTERING RULES:
-- When user asks about a SPECIFIC course (e.g., "CSI2532", "MAT2777"), show ONLY that course's data
-- When user asks for "latest" or "recent", show ONLY the most recent 1-3 items
-- When user asks "what's due", show ONLY upcoming items sorted by date
-- NEVER dump all data unless explicitly asked for "all" or "everything"
-- Use the friendly course codes (CSI2532, MAT2777) not the internal codes
+🎯 CRITICAL RESPONSE RULES:
+1. BE SPECIFIC: When user asks about a specific course, show ONLY that course's data
+2. BE CONCISE: When user asks for "latest" or "recent", show only 1-3 most relevant items
+3. BE ORGANIZED: Use bullet points and clear formatting
+4. BE HELPFUL: If data is missing, tell them how to get it
+5. BE ACCURATE: Only state facts from the data provided
+6. USE FRIENDLY CODES: Always use course codes like "CSI2532" not internal IDs
+
+❌ NEVER:
+- Dump all data unless explicitly asked for "all" or "everything"
+- Make up information not in the provided data
+- Use technical IDs or internal codes in responses
+- Give overly long responses for simple questions
 
 """
         
-        # Add courses info with both codes
+        # Add courses info
         if courses:
-            prompt += f"\n## Student's Courses ({len(courses)} total):\n"
-            active_courses = [c for c in courses if c.get('isActive')]
-            course_list = []
-            for course in active_courses[:15]:
+            prompt += f"\n## Student's Enrolled Courses ({len(courses)} total):\n"
+            for course in courses:
                 name = course.get('name', 'Unknown')
                 friendly_code = name.split('[')[0].strip() if '[' in name else course.get('code', 'N/A')
-                internal_code = course.get('code', 'N/A')
                 org_id = course.get('orgUnitId', '')
-                course_list.append(f"- {friendly_code} (Internal: {internal_code}, OrgID: {org_id}): {name}")
-            prompt += "\n".join(course_list)
+                prompt += f"- {friendly_code} (OrgID: {org_id}): {name}\n"
         
-        # Add grades info with friendly course codes
+        # Add grades info
         if grades:
-            prompt += f"\n\n## Grades Data:\n"
-            for course_grade in grades[:20]:
+            prompt += f"\n## Grades Data ({len(grades)} courses):\n"
+            for course_grade in grades:
                 if course_grade.get('grades') and len(course_grade['grades']) > 0:
                     org_id = course_grade.get('orgUnitId', '')
                     internal_code = course_grade.get('courseCode', 'N/A')
                     
-                    # Get friendly code from course map
+                    # Get friendly code
                     friendly_code = internal_code
-                    course_name = course_grade.get('courseName', 'Unknown')
                     if org_id in course_map:
                         friendly_code = course_map[org_id]['code']
-                        course_name = course_map[org_id]['name']
                     
-                    prompt += f"\n**{friendly_code}** (Internal: {internal_code}):\n"
-                    for grade in course_grade['grades']:
+                    prompt += f"\n**{friendly_code}**:\n"
+                    for grade in course_grade['grades'][:10]:  # Limit to 10 per course
                         grade_info = f"  - {grade['name']}: {grade.get('displayedGrade', 'N/A')}"
                         if grade.get('pointsNumerator') is not None and grade.get('pointsDenominator') is not None:
                             grade_info += f" ({grade['pointsNumerator']}/{grade['pointsDenominator']})"
                         prompt += grade_info + "\n"
         
-        # Add assignments with friendly codes
+        # Add assignments
         if assignments:
-            prompt += f"\n## Assignments & Due Dates:\n"
-            for course_assignments in assignments[:15]:
+            prompt += f"\n## Assignments & Due Dates ({len(assignments)} courses):\n"
+            for course_assignments in assignments:
                 org_id = course_assignments.get('orgUnitId', '')
                 internal_code = course_assignments.get('courseCode', 'N/A')
                 
-                # Get friendly code
                 friendly_code = internal_code
                 if org_id in course_map:
                     friendly_code = course_map[org_id]['code']
                 
-                if course_assignments.get('assignments') and len(course_assignments['assignments']) > 0:
+                if course_assignments.get('assignments'):
                     prompt += f"\n**{friendly_code}**:\n"
                     for assignment in course_assignments['assignments'][:5]:
                         assignment_info = f"  - {assignment['name']}"
                         if assignment.get('dueDate'):
-                            assignment_info += f" | Due: {assignment['dueDate'][:10]}"
+                            due_date = assignment['dueDate'][:10]  # Just the date
+                            assignment_info += f" | Due: {due_date}"
                         prompt += assignment_info + "\n"
         
-        # Add announcements with friendly codes
+        # Add announcements
         if announcements:
-            prompt += f"\n## Recent Announcements:\n"
-            all_announcements = []
-            for course_announcements in announcements:
-                org_id = course_announcements.get('orgUnitId', '')
-                internal_code = course_announcements.get('courseCode', 'N/A')
-                
-                # Get friendly code
-                friendly_code = internal_code
-                if org_id in course_map:
-                    friendly_code = course_map[org_id]['code']
-                
-                if course_announcements.get('announcements'):
-                    for announcement in course_announcements['announcements']:
-                        all_announcements.append({
-                            'course': friendly_code,
-                            'title': announcement['title'],
-                            'date': announcement.get('publishDate', ''),
-                            'body': announcement.get('body', '')[:200]
-                        })
-            
-            # Sort by date (most recent first)
-            all_announcements.sort(key=lambda x: x['date'], reverse=True)
-            
-            # Show most recent 10
-            for announcement in all_announcements[:10]:
-                prompt += f"\n{announcement['course']} | {announcement['date'][:10] if announcement['date'] else 'No date'}:\n"
-                prompt += f"  Title: {announcement['title']}\n"
+            # Handle both formats: list of announcements or list of course-announcements
+            if isinstance(announcements, list) and announcements:
+                if isinstance(announcements[0], dict) and 'courseCode' in announcements[0]:
+                    # Already flattened
+                    prompt += f"\n## Recent Announcements ({len(announcements)} total):\n"
+                    for ann in announcements[:10]:
+                        prompt += f"\n{ann.get('courseCode', 'Unknown')} | {ann.get('publishDate', '')[:10]}:\n"
+                        prompt += f"  {ann.get('title', 'No title')}\n"
+                else:
+                    # Grouped by course
+                    prompt += f"\n## Recent Announcements ({len(announcements)} courses):\n"
+                    for course_ann in announcements:
+                        if course_ann.get('announcements'):
+                            friendly_code = course_ann.get('courseCode', 'Unknown')
+                            for ann in course_ann['announcements'][:3]:
+                                prompt += f"\n{friendly_code} | {ann.get('publishDate', '')[:10]}:\n"
+                                prompt += f"  {ann.get('title', 'No title')}\n"
         
         prompt += """
 
-RESPONSE EXAMPLES:
-User: "Show me only CSI2532 grades"
+📝 EXAMPLE RESPONSES:
+
+User: "What's my grade in CSI2532?"
 You: "Here are your CSI2532 grades:
-• Devoir 1: A+
-• Mi-Session: A
-• Examen Final: D+"
+• Devoir 1: A+ (9.5/10)
+• Mi-Session: A (85/100)
+• Examen Final: D+ (55/100)"
 
-User: "What's the latest announcement?"
-You: "The latest announcement is from MAT2777 on 2024-10-15: 'Midterm Results Posted'"
+User: "What's due this week?"
+You: "Assignments due this week:
 
-User: "When is MAT2777 homework due?"
-You: "MAT2777 assignments:
-• Devoir 3: Due October 25, 2024
-• Devoir 4: Due November 8, 2024"
+**CSI2532**:
+• Devoir 3 - Due: Oct 25, 2024
 
-REMEMBER: Filter data precisely based on what the user asks!
+**MAT2777**:
+• Problem Set 5 - Due: Oct 27, 2024"
+
+User: "Latest announcement?"
+You: "Most recent announcement:
+
+**MAT2777** - Oct 20, 2024:
+Midterm results are now available. Check your grades page."
+
+Remember: Be specific, concise, and helpful!
 """
         
         return prompt
@@ -165,22 +317,17 @@ REMEMBER: Filter data precisely based on what the user asks!
         self, 
         query: str, 
         context: Dict[str, Any],
-        conversation_history: List[Dict[str, str]] = None
+        conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> str:
         """
-        Generate a response using Mistral AI
-        
-        Args:
-            query: The user's question
-            context: Dictionary containing courses, grades, assignments, announcements
-            conversation_history: Optional list of previous messages
-            
-        Returns:
-            AI-generated response string
+        Generate a response using Mistral AI with smart filtering.
         """
         try:
-            # Build system prompt with context
-            system_prompt = self.build_system_prompt(context)
+            # Pre-filter context to reduce tokens and improve responses
+            filtered_context = self.filter_relevant_data(query, context)
+            
+            # Build system prompt with filtered context
+            system_prompt = self.build_system_prompt(filtered_context)
             
             # Build message list
             messages = [
@@ -199,19 +346,13 @@ REMEMBER: Filter data precisely based on what the user asks!
             messages.append({"role": "user", "content": query})
             
             # Determine temperature based on query type
-            query_lower = query.lower()
+            temperature = self._determine_temperature(query)
             
-            # Factual queries need low temperature (more precise)
-            if any(word in query_lower for word in ['when', 'what', 'which', 'latest', 'recent', 'due', 'grade', 'announcement']):
-                temperature = 0.3  # Very precise for factual queries
-            # Advisory queries can be more creative
-            elif any(word in query_lower for word in ['should', 'recommend', 'suggest', 'advice', 'help', 'how']):
-                temperature = 0.7  # More creative for advice
-            else:
-                temperature = 0.5  # Balanced
+            # Log request details
+            total_tokens = self.estimate_tokens(system_prompt + query)
+            logger.info(f"🤖 Calling Mistral API (model: {self.model}, temp: {temperature}, est. tokens: {total_tokens})")
             
             # Call Mistral API
-            print(f"🤖 Calling Mistral API with query: {query} (temp: {temperature})")
             response = self.client.chat.complete(
                 model=self.model,
                 messages=messages,
@@ -220,29 +361,59 @@ REMEMBER: Filter data precisely based on what the user asks!
             )
             
             ai_response = response.choices[0].message.content
-            print(f"✅ Mistral response generated ({len(ai_response)} chars)")
+            logger.info(f"✅ Mistral response generated ({len(ai_response)} chars)")
             
             return ai_response
             
         except Exception as e:
-            print(f"❌ Error calling Mistral API: {e}")
-            return f"I apologize, but I encountered an error processing your question: {str(e)}"
+            logger.error(f"❌ Error calling Mistral API: {e}", exc_info=True)
+            # Return a helpful error message
+            return (
+                "I apologize, but I encountered an error processing your question. "
+                "This could be due to:\n"
+                "• API connectivity issues\n"
+                "• Rate limiting\n"
+                "• Invalid API key\n\n"
+                "Please try again in a moment, or contact support if the issue persists."
+            )
+    
+    def _determine_temperature(self, query: str) -> float:
+        """
+        Determine optimal temperature based on query type.
+        Lower = more precise, Higher = more creative
+        """
+        query_lower = query.lower()
+        
+        # Factual queries need low temperature (more precise)
+        factual_keywords = ['when', 'what', 'which', 'latest', 'recent', 'due', 
+                           'grade', 'announcement', 'how many', 'list', 'show']
+        if any(word in query_lower for word in factual_keywords):
+            return 0.2  # Very precise
+        
+        # Advisory queries can be more creative
+        advisory_keywords = ['should', 'recommend', 'suggest', 'advice', 
+                            'help', 'how to', 'what if', 'strategy']
+        if any(word in query_lower for word in advisory_keywords):
+            return 0.7  # More creative
+        
+        # Default balanced temperature
+        return 0.4
     
     def estimate_tokens(self, text: str) -> int:
         """
-        Rough estimation of tokens (for monitoring costs)
+        Rough estimation of tokens (for monitoring costs).
+        1 token ≈ 4 characters for English text
         """
-        # Rough estimate: 1 token ≈ 4 characters
         return len(text) // 4
 
 # Global instance
-mistral_service = None
+_mistral_service = None
 
 def get_mistral_service() -> MistralService:
     """
-    Get or create Mistral service instance
+    Get or create Mistral service instance (singleton pattern).
     """
-    global mistral_service
-    if mistral_service is None:
-        mistral_service = MistralService()
-    return mistral_service
+    global _mistral_service
+    if _mistral_service is None:
+        _mistral_service = MistralService()
+    return _mistral_service

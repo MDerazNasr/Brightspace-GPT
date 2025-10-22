@@ -1,0 +1,53 @@
+# Environment variables - CRITICAL: Protects your API keys
+backend/.env
+.env
+*.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+venv/
+env/
+ENV/
+.venv
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# OAuth test files
+oauth_test_url.txt
+
+# Node modules (frontend)
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Build outputs
+frontend/dist/
+frontend/build/
