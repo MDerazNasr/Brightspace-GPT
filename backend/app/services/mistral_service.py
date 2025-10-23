@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 class MistralService:
     """
-    Service for interacting with Mistral AI LLM with smart filtering and context management
+    Service for interacting with Mistral AI LLM with conversation history and smart filtering
     """
     
     def __init__(self):
@@ -19,7 +19,7 @@ class MistralService:
         
         self.client = Mistral(api_key=api_key)
         # Use mistral-small for cost-effectiveness, or switch to mistral-large for better quality
-        self.model = os.getenv('MISTRAL_MODEL', "open-mistral-7b")
+        self.model = os.getenv('MISTRAL_MODEL', "mistral-small-latest")
         logger.info(f"🤖 Initialized Mistral service with model: {self.model}")
     
     def filter_relevant_data(self, query: str, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -173,7 +173,7 @@ class MistralService:
         
         return upcoming
     
-    def build_system_prompt(self, context: Dict[str, Any]) -> str:
+    def build_system_prompt(self, context: Dict[str, Any], has_history: bool = False) -> str:
         """
         Build a comprehensive system prompt with filtered context.
         """
@@ -181,6 +181,7 @@ class MistralService:
         grades = context.get('grades', [])
         assignments = context.get('assignments', [])
         announcements = context.get('announcements', [])
+        current_term_only = context.get('currentTermOnly', True)
         
         # Build a mapping of orgUnitId to course info
         course_map = {}
@@ -195,22 +196,41 @@ class MistralService:
                     'fullCode': course.get('code', '')
                 }
         
-        prompt = """You are a helpful AI assistant for University of Ottawa students using Brightspace.
+        prompt = f"""You are a helpful AI assistant for University of Ottawa students using Brightspace.
 You help students understand their courses, grades, assignments, and announcements.
 
-🎯 CRITICAL RESPONSE RULES:
-1. BE SPECIFIC: When user asks about a specific course, show ONLY that course's data
-2. BE CONCISE: When user asks for "latest" or "recent", show only 1-3 most relevant items
-3. BE ORGANIZED: Use bullet points and clear formatting
-4. BE HELPFUL: If data is missing, tell them how to get it
-5. BE ACCURATE: Only state facts from the data provided
-6. USE FRIENDLY CODES: Always use course codes like "CSI2532" not internal IDs
+{"🎓 IMPORTANT: Only showing CURRENT TERM courses (last 4 months). Past courses are filtered out unless specifically requested." if current_term_only else ""}
 
+🎯 CRITICAL RESPONSE RULES:
+1. BE CONVERSATIONAL: You're having a natural conversation with the student
+2. BE SPECIFIC: When user asks about a specific course, show ONLY that course's data
+3. BE CONCISE: Give focused answers unless asked for comprehensive details
+4. BE CONTEXTUAL: Remember what was discussed earlier in the conversation
+5. BE HELPFUL: If data is missing, tell them how to get it
+6. BE ACCURATE: Only state facts from the provided data
+7. USE FRIENDLY CODES: Always use course codes like "CSI2532" not internal IDs
+8. ACKNOWLEDGE CONTEXT: Reference previous questions naturally when relevant
+
+"""
+        
+        # Add conversation context note if we have history
+        if has_history:
+            prompt += """
+💬 CONVERSATION CONTEXT:
+- This is an ongoing conversation - reference previous messages when relevant
+- Use phrases like "As I mentioned..." or "Building on that..." to maintain flow
+- If the user asks a follow-up question, understand it in context of what was discussed
+- Be natural and conversational, not robotic
+
+"""
+        
+        prompt += """
 ❌ NEVER:
 - Dump all data unless explicitly asked for "all" or "everything"
 - Make up information not in the provided data
 - Use technical IDs or internal codes in responses
 - Give overly long responses for simple questions
+- Ignore the conversation context
 
 """
         
@@ -285,7 +305,9 @@ You help students understand their courses, grades, assignments, and announcemen
         
         prompt += """
 
-📝 EXAMPLE RESPONSES:
+📝 CONVERSATION STYLE:
+
+Be natural and conversational. Examples:
 
 User: "What's my grade in CSI2532?"
 You: "Here are your CSI2532 grades:
@@ -293,8 +315,14 @@ You: "Here are your CSI2532 grades:
 • Mi-Session: A (85/100)
 • Examen Final: D+ (55/100)"
 
+User: "How about the other assignments?"
+You: "Looking at your other CSI2532 assignments:
+• Devoir 2: B+ (8/10)
+• Devoir 3: A (9/10)
+You're doing well overall!"
+
 User: "What's due this week?"
-You: "Assignments due this week:
+You: "You have 2 assignments due this week:
 
 **CSI2532**:
 • Devoir 3 - Due: Oct 25, 2024
@@ -302,13 +330,10 @@ You: "Assignments due this week:
 **MAT2777**:
 • Problem Set 5 - Due: Oct 27, 2024"
 
-User: "Latest announcement?"
-You: "Most recent announcement:
+User: "When's the CSI2532 one due exactly?"
+You: "Your CSI2532 Devoir 3 is due on October 25, 2024."
 
-**MAT2777** - Oct 20, 2024:
-Midterm results are now available. Check your grades page."
-
-Remember: Be specific, concise, and helpful!
+Remember: Be helpful, conversational, and context-aware!
 """
         
         return prompt
@@ -320,14 +345,19 @@ Remember: Be specific, concise, and helpful!
         conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> str:
         """
-        Generate a response using Mistral AI with smart filtering.
+        Generate a response using Mistral AI with conversation history.
         """
         try:
             # Pre-filter context to reduce tokens and improve responses
             filtered_context = self.filter_relevant_data(query, context)
             
+            # Add the currentTermOnly flag to filtered context
+            if 'currentTermOnly' in context:
+                filtered_context['currentTermOnly'] = context['currentTermOnly']
+            
             # Build system prompt with filtered context
-            system_prompt = self.build_system_prompt(filtered_context)
+            has_history = conversation_history and len(conversation_history) > 0
+            system_prompt = self.build_system_prompt(filtered_context, has_history)
             
             # Build message list
             messages = [
@@ -336,7 +366,7 @@ Remember: Be specific, concise, and helpful!
             
             # Add conversation history if provided
             if conversation_history:
-                for msg in conversation_history[-5:]:  # Last 5 messages for context
+                for msg in conversation_history:
                     messages.append({
                         "role": msg['role'],
                         "content": msg['content']
@@ -349,7 +379,8 @@ Remember: Be specific, concise, and helpful!
             temperature = self._determine_temperature(query)
             
             # Log request details
-            total_tokens = self.estimate_tokens(system_prompt + query)
+            total_tokens = self.estimate_tokens(system_prompt + query + 
+                                               str(conversation_history) if conversation_history else '')
             logger.info(f"🤖 Calling Mistral API (model: {self.model}, temp: {temperature}, est. tokens: {total_tokens})")
             
             # Call Mistral API

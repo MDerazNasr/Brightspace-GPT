@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
 from app.services.mistral_service import get_mistral_service
 import logging
+from datetime import datetime
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -24,19 +25,27 @@ class Course(BaseModel):
     description: Optional[str] = ""
     semester: Optional[str] = None
 
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+    timestamp: Optional[str] = None
+
 class ChatRequest(BaseModel):
     query: str
     context: Dict[str, Any]
     sessionId: str
+    conversationHistory: Optional[List[Dict[str, str]]] = None
 
 class ChatResponse(BaseModel):
     response: str
     suggestedActions: Optional[List[Dict[str, str]]] = None
+    sessionId: str
+    timestamp: str
 
 @router.post("/query", response_model=ChatResponse)
 async def chat_query(request: ChatRequest):
     """
-    Handle chat queries from the Chrome extension using Mistral AI
+    Handle chat queries from the Chrome extension using Mistral AI with conversation history
     """
     try:
         # Extract context
@@ -45,21 +54,26 @@ async def chat_query(request: ChatRequest):
         grades = request.context.get('grades', [])
         assignments = request.context.get('assignments', [])
         announcements = request.context.get('announcements', [])
+        conversation_history = request.conversationHistory or []
+        current_term_only = request.context.get('currentTermOnly', True)
         
         logger.info(f"📥 Received query: {request.query}")
         logger.info(f"📚 Context: {len(courses)} courses, {len(grades)} grade sets, {len(assignments)} assignment sets, {len(announcements)} announcement sets")
+        logger.info(f"💬 Conversation history: {len(conversation_history)} messages")
+        logger.info(f"🎓 Current term only: {current_term_only}")
         
         # Check if we have any data
         has_data = len(courses) > 0 or len(grades) > 0 or len(assignments) > 0 or len(announcements) > 0
         
-        if not has_data:
-            # No data available - provide helpful message
+        if not has_data and len(conversation_history) == 0:
+            # First message and no data - provide helpful onboarding
             response_text = (
                 "I don't have any data loaded yet. To get started:\n\n"
-                "1. Click 'Sync All My Courses' to load your course list\n"
-                "2. Click 'Fetch All Grades' to get your grades\n"
-                "3. Click 'Fetch All Assignments' for upcoming work\n"
-                "4. Click 'Fetch All Announcements' for news\n\n"
+                "1. Click ⚙️ (Settings) in the top right\n"
+                "2. Click 'Sync All My Courses' to load your course list\n"
+                "3. Click 'Fetch All Grades' to get your grades\n"
+                "4. Click 'Fetch All Assignments' for upcoming work\n"
+                "5. Click 'Fetch All Announcements' for news\n\n"
                 "Once loaded, you can ask me questions like:\n"
                 "• 'What courses do I have?'\n"
                 "• 'What's my CSI2532 grade?'\n"
@@ -71,11 +85,13 @@ async def chat_query(request: ChatRequest):
                 response=response_text,
                 suggestedActions=[
                     {
-                        "label": "Sync Courses",
+                        "label": "Open Settings",
                         "type": "action",
-                        "query": "sync_courses"
+                        "query": "open_settings"
                     }
-                ]
+                ],
+                sessionId=request.sessionId,
+                timestamp=datetime.utcnow().isoformat()
             )
         
         # Get Mistral service
@@ -90,76 +106,142 @@ async def chat_query(request: ChatRequest):
             'currentPage': current_page
         }
         
-        # Generate AI response using Mistral
-        logger.info("🤖 Calling Mistral AI...")
+        # Format conversation history for Mistral
+        formatted_history = []
+        if conversation_history:
+            # Take last 10 messages to avoid token limit
+            recent_history = conversation_history[-10:]
+            for msg in recent_history:
+                formatted_history.append({
+                    'role': msg.get('role', 'user'),
+                    'content': msg.get('content', '')
+                })
+        
+        # Generate AI response using Mistral with conversation history
+        logger.info(f"🤖 Calling Mistral AI with {len(formatted_history)} history messages...")
         ai_response = await mistral_service.generate_response(
             query=request.query,
             context=context_data,
-            conversation_history=None  # TODO: Add conversation history from sessionId
+            conversation_history=formatted_history
         )
         
         logger.info(f"✅ Generated response ({len(ai_response)} chars)")
         
-        # Generate suggested actions based on query
-        suggested_actions = generate_suggested_actions(request.query, context_data)
+        # Generate suggested actions based on query and conversation
+        suggested_actions = generate_suggested_actions(
+            request.query, 
+            context_data, 
+            conversation_history
+        )
         
         return ChatResponse(
             response=ai_response,
-            suggestedActions=suggested_actions
+            suggestedActions=suggested_actions,
+            sessionId=request.sessionId,
+            timestamp=datetime.utcnow().isoformat()
         )
         
     except Exception as e:
         logger.error(f"❌ Error processing query: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error processing query: {str(e)}")
 
-def generate_suggested_actions(query: str, context: Dict[str, Any]) -> List[Dict[str, str]]:
+def generate_suggested_actions(
+    query: str, 
+    context: Dict[str, Any],
+    conversation_history: List[Dict[str, str]] = None
+) -> List[Dict[str, str]]:
     """
-    Generate contextual suggested actions based on the query and available data.
+    Generate contextual suggested actions based on the query, context, and conversation flow.
     """
     query_lower = query.lower()
     suggestions = []
     
-    # Course-related suggestions
-    if 'course' in query_lower and context.get('courses'):
+    # Check conversation context for follow-up suggestions
+    has_mentioned_course = False
+    mentioned_courses = set()
+    
+    if conversation_history:
+        # Look for course mentions in recent conversation
+        recent_messages = conversation_history[-5:]
+        for msg in recent_messages:
+            content = msg.get('content', '').lower()
+            # Simple course code detection (e.g., CSI2532)
+            import re
+            course_codes = re.findall(r'\b[A-Z]{3,4}\d{4}\b', msg.get('content', ''))
+            if course_codes:
+                has_mentioned_course = True
+                mentioned_courses.update(course_codes)
+    
+    # Smart follow-up suggestions based on conversation
+    if has_mentioned_course and mentioned_courses:
+        course = list(mentioned_courses)[0]
         suggestions.append({
-            "label": "View All Courses",
+            "label": f"What's due in {course}?",
             "type": "query",
-            "query": "Show me all my courses"
+            "query": f"What assignments are due soon in {course}?"
+        })
+        suggestions.append({
+            "label": f"Any {course} announcements?",
+            "type": "query",
+            "query": f"Are there any recent announcements in {course}?"
         })
     
-    # Grade-related suggestions
-    if 'grade' in query_lower or 'mark' in query_lower:
-        if context.get('grades'):
+    # Course-related suggestions
+    elif 'course' in query_lower:
+        if context.get('courses'):
             suggestions.append({
                 "label": "Compare Grades",
                 "type": "query",
                 "query": "Compare my grades across all courses"
             })
+            suggestions.append({
+                "label": "Upcoming Deadlines",
+                "type": "query",
+                "query": "What's due in the next 7 days?"
+            })
+    
+    # Grade-related suggestions
+    elif 'grade' in query_lower or 'mark' in query_lower:
         suggestions.append({
-            "label": "Refresh Grades",
-            "type": "action",
-            "query": "fetch_grades"
+            "label": "Course Average",
+            "type": "query",
+            "query": "What's my current average across all courses?"
+        })
+        suggestions.append({
+            "label": "Lowest Grade",
+            "type": "query",
+            "query": "Which course do I need to focus on?"
         })
     
     # Assignment-related suggestions
-    if 'assignment' in query_lower or 'due' in query_lower:
+    elif 'assignment' in query_lower or 'due' in query_lower:
         suggestions.append({
-            "label": "Upcoming Deadlines",
+            "label": "This Week",
             "type": "query",
-            "query": "What's due in the next 7 days?"
+            "query": "What's due this week?"
         })
         suggestions.append({
-            "label": "Refresh Assignments",
-            "type": "action",
-            "query": "fetch_assignments"
+            "label": "Next Week",
+            "type": "query",
+            "query": "What's due next week?"
+        })
+        suggestions.append({
+            "label": "Overdue",
+            "type": "query",
+            "query": "Do I have any overdue assignments?"
         })
     
     # Announcement-related suggestions
-    if 'announcement' in query_lower or 'news' in query_lower:
+    elif 'announcement' in query_lower or 'news' in query_lower:
         suggestions.append({
             "label": "Latest Updates",
             "type": "query",
             "query": "Show me the 5 most recent announcements"
+        })
+        suggestions.append({
+            "label": "Important News",
+            "type": "query",
+            "query": "Any important announcements I should know about?"
         })
     
     # Default suggestions if none match
@@ -212,9 +294,6 @@ async def sync_courses(data: Dict[str, Any]):
     except Exception as e:
         logger.error(f"❌ Error syncing courses: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-
-# Add this endpoint to backend/app/api/chat.py for testing
-# This lets you test Mistral directly from the browser
 
 @router.get("/test-mistral")
 async def test_mistral_connection():
@@ -328,13 +407,23 @@ async def test_mistral_connection():
     
     return result
 
-
-# Also add a simple test endpoint
 @router.get("/ping")
 async def ping():
     """Test if the API is responding"""
     return {
         "status": "ok",
         "message": "Backend is running",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+@router.get("/health")
+async def health_check():
+    """
+    Health check endpoint for the extension to test connectivity
+    """
+    return {
+        "status": "healthy",
+        "service": "Brightspace GPT API",
+        "version": "2.0.0",
+        "timestamp": datetime.utcnow().isoformat()
     }

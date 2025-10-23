@@ -1,621 +1,693 @@
-// popup.js - Development/Testing Mode for Brightspace GPT Extension
+// popup.js - Chat Mode for Brightspace GPT Extension
 
 const API_BASE_URL = 'http://localhost:8001/api';
+
+// State management
+let conversationHistory = [];
+let isLoading = false;
+let currentSessionId = null;
+let currentTermOnly = true; // Filter to current term by default
 
 console.log('🚀 Popup script loaded');
 
 // Initialize when DOM is ready
 document.addEventListener('DOMContentLoaded', function() {
   console.log('✅ DOM Content Loaded');
-  
-  // Add event listeners to buttons
-  document.getElementById('detectPageBtn').addEventListener('click', detectCurrentPage);
-  document.getElementById('extractDataBtn').addEventListener('click', testDataExtraction);
-  document.getElementById('testBackendBtn').addEventListener('click', testBackendConnection);
-  document.getElementById('sendTestBtn').addEventListener('click', sendTestQuery);
-  document.getElementById('syncAllBtn').addEventListener('click', syncAllCourses);
-  document.getElementById('fetchGradesBtn').addEventListener('click', fetchAllGrades);
-  document.getElementById('fetchAssignmentsBtn').addEventListener('click', fetchAllAssignments);
-  document.getElementById('fetchAnnouncementsBtn').addEventListener('click', fetchAllAnnouncements);
-  
-  // Initialize
+  initializeChat();
+  setupEventListeners();
   checkInitialStatus();
-  detectCurrentPage();
+  loadConversationHistory();
 });
+
+/**
+ * Initialize chat interface
+ */
+function initializeChat() {
+  const messageInput = document.getElementById('messageInput');
+  const sendBtn = document.getElementById('sendBtn');
+  
+  // Auto-resize textarea
+  messageInput.addEventListener('input', function() {
+    this.style.height = 'auto';
+    this.style.height = (this.scrollHeight) + 'px';
+    
+    // Enable/disable send button
+    sendBtn.disabled = !this.value.trim() || isLoading;
+  });
+  
+  // Send on Enter (but Shift+Enter for new line)
+  messageInput.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (!sendBtn.disabled) {
+        sendMessage();
+      }
+    }
+  });
+}
+
+/**
+ * Setup all event listeners
+ */
+function setupEventListeners() {
+  // Send message
+  document.getElementById('sendBtn').addEventListener('click', sendMessage);
+  
+  // Header buttons
+  document.getElementById('refreshBtn').addEventListener('click', refreshData);
+  document.getElementById('settingsBtn').addEventListener('click', toggleSettings);
+  document.getElementById('clearBtn').addEventListener('click', clearChat);
+  
+  // Settings panel buttons
+  document.getElementById('syncCoursesBtn').addEventListener('click', syncAllCourses);
+  document.getElementById('fetchGradesBtn').addEventListener('click', () => fetchData('grades'));
+  document.getElementById('fetchAssignmentsBtn').addEventListener('click', () => fetchData('assignments'));
+  document.getElementById('fetchAnnouncementsBtn').addEventListener('click', () => fetchData('announcements'));
+  document.getElementById('testBackendBtn').addEventListener('click', testBackend);
+  document.getElementById('viewLogsBtn').addEventListener('click', viewLogs);
+  
+  // Term filter toggle
+  document.getElementById('currentTermOnly').addEventListener('change', function(e) {
+    currentTermOnly = e.target.checked;
+    chrome.storage.local.set({ currentTermOnly: currentTermOnly });
+    updateDataInfo();
+    console.log(`🎓 Current term filter: ${currentTermOnly ? 'ON' : 'OFF'}`);
+  });
+  
+  // Suggestion chips
+  document.querySelectorAll('.suggestion-chip').forEach(chip => {
+    chip.addEventListener('click', function() {
+      const query = this.dataset.query;
+      document.getElementById('messageInput').value = query;
+      sendMessage();
+    });
+  });
+  
+  // Close settings when clicking outside
+  document.addEventListener('click', function(e) {
+    const settingsPanel = document.getElementById('settingsPanel');
+    const settingsBtn = document.getElementById('settingsBtn');
+    
+    if (!settingsPanel.contains(e.target) && e.target !== settingsBtn) {
+      settingsPanel.classList.remove('show');
+    }
+  });
+}
 
 /**
  * Check initial connection status
  */
-function checkInitialStatus() {
+async function checkInitialStatus() {
   console.log('🔍 Checking initial status...');
-  const statusDiv = document.getElementById('status');
   
-  chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+  // Load filter preference
+  const filterData = await chrome.storage.local.get(['currentTermOnly']);
+  if (filterData.currentTermOnly !== undefined) {
+    currentTermOnly = filterData.currentTermOnly;
+    document.getElementById('currentTermOnly').checked = currentTermOnly;
+  }
+  
+  try {
+    // Check if we're on Brightspace
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tab = tabs[0];
-    console.log('Current tab URL:', tab.url);
     
     if (!tab.url.includes('brightspace.com')) {
-      statusDiv.className = 'status error';
-      statusDiv.innerHTML = '⚠️ Not on Brightspace. Please navigate to uottawa.brightspace.com';
+      updateStatus('Not on Brightspace', 'error');
       return;
     }
     
     // Try to ping content script
     chrome.tabs.sendMessage(tab.id, { action: 'ping' }, function(response) {
       if (chrome.runtime.lastError) {
-        console.error('❌ Content script error:', chrome.runtime.lastError);
-        statusDiv.className = 'status error';
-        statusDiv.innerHTML = '⚠️ Content script not loaded. Please refresh the Brightspace page.';
+        updateStatus('Refresh Brightspace page', 'error');
       } else {
-        console.log('✅ Content script responding');
-        statusDiv.className = 'status';
-        statusDiv.innerHTML = '✅ Connected to Brightspace page';
+        updateStatus('Connected');
+        updateDataInfo();
       }
     });
-  });
+  } catch (error) {
+    console.error('❌ Status check error:', error);
+    updateStatus('Connection error', 'error');
+  }
 }
 
 /**
- * Detect current page type
+ * Update status indicator
  */
-function detectCurrentPage() {
-  console.log('🔍 Detecting page type...');
-  const pageInfoDiv = document.getElementById('pageInfo');
+function updateStatus(text, type = 'success') {
+  const statusText = document.getElementById('statusText');
+  const statusDot = document.getElementById('statusDot');
   
-  chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
-    const tab = tabs[0];
+  statusText.textContent = text;
+  
+  if (type === 'error') {
+    statusDot.classList.add('error');
+  } else {
+    statusDot.classList.remove('error');
+  }
+}
+
+/**
+ * Update data info in status bar
+ */
+async function updateDataInfo() {
+  const data = await chrome.storage.local.get([
+    'brightspace_courses',
+    'brightspace_grades',
+    'brightspace_assignments',
+    'brightspace_announcements'
+  ]);
+  
+  // Filter courses if needed
+  let courses = data.brightspace_courses || [];
+  if (currentTermOnly) {
+    courses = filterCurrentTermCourses(courses);
+  }
+  
+  const counts = {
+    courses: courses.length,
+    grades: data.brightspace_grades?.length || 0,
+    assignments: data.brightspace_assignments?.length || 0,
+    announcements: data.brightspace_announcements?.length || 0
+  };
+  
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  
+  if (total === 0) {
+    document.getElementById('dataInfo').textContent = 'No data loaded';
+    document.getElementById('dataStatus').innerHTML = `
+      <strong>No data loaded yet</strong><br>
+      Click "Sync All Courses" to get started
+    `;
+  } else {
+    const termText = currentTermOnly ? ' (current term)' : ' (all terms)';
+    document.getElementById('dataInfo').textContent = 
+      `${counts.courses} courses${termText} • ${counts.grades} grades loaded`;
     
-    if (!tab.url.includes('brightspace.com')) {
-      pageInfoDiv.innerHTML = '❌ Not on Brightspace';
-      return;
+    document.getElementById('dataStatus').innerHTML = `
+      <strong>Data Loaded:</strong><br>
+      Courses: ${counts.courses}${termText}<br>
+      Grades: ${counts.grades}<br>
+      Assignments: ${counts.assignments}<br>
+      Announcements: ${counts.announcements}
+    `;
+  }
+}
+
+/**
+ * Filter courses to only current term (4 months)
+ */
+function filterCurrentTermCourses(courses) {
+  if (!courses || courses.length === 0) return [];
+  
+  const now = new Date();
+  const fourMonthsAgo = new Date(now.getTime() - (120 * 24 * 60 * 60 * 1000)); // 120 days
+  
+  return courses.filter(course => {
+    // If course is explicitly marked as active, include it
+    if (course.isActive === true) return true;
+    
+    // Check end date - if course ended more than 4 months ago, exclude it
+    if (course.endDate) {
+      try {
+        const endDate = new Date(course.endDate);
+        if (endDate < fourMonthsAgo) {
+          console.log(`📅 Filtering out past course: ${course.code} (ended ${endDate.toLocaleDateString()})`);
+          return false;
+        }
+      } catch (e) {
+        console.warn(`⚠️ Could not parse end date for ${course.code}`);
+      }
     }
     
-    chrome.tabs.sendMessage(tab.id, { action: 'extractData' }, function(response) {
-      if (chrome.runtime.lastError) {
-        console.error('❌ Error:', chrome.runtime.lastError);
-        pageInfoDiv.innerHTML = '❌ Could not detect page type';
-        return;
+    // Check start date - if course hasn't started yet and is more than 1 month away, exclude it
+    if (course.startDate) {
+      try {
+        const startDate = new Date(course.startDate);
+        const oneMonthFromNow = new Date(now.getTime() + (30 * 24 * 60 * 60 * 1000));
+        if (startDate > oneMonthFromNow) {
+          console.log(`📅 Filtering out future course: ${course.code} (starts ${startDate.toLocaleDateString()})`);
+          return false;
+        }
+      } catch (e) {
+        console.warn(`⚠️ Could not parse start date for ${course.code}`);
       }
-      
-      if (response && response.pageType) {
-        console.log('📄 Page data:', response);
-        pageInfoDiv.innerHTML = `
-          <strong>Page Type:</strong> ${response.pageType}<br>
-          <strong>Course ID:</strong> ${response.courseId || 'N/A'}<br>
-          <strong>URL:</strong> ${tab.url.substring(0, 50)}...
-        `;
-      } else {
-        pageInfoDiv.innerHTML = '❌ Could not detect page type';
-      }
-    });
+    }
+    
+    // Default: include the course
+    return true;
   });
 }
 
 /**
- * Test data extraction from current page
+ * Load conversation history from storage
  */
-function testDataExtraction() {
-  console.log('🧪 Testing data extraction...');
-  const btn = document.getElementById('extractDataBtn');
-  const dataDiv = document.getElementById('extractedData');
+async function loadConversationHistory() {
+  const data = await chrome.storage.local.get(['conversation_history', 'session_id']);
+  
+  if (data.conversation_history && data.conversation_history.length > 0) {
+    conversationHistory = data.conversation_history;
+    currentSessionId = data.session_id;
+    
+    // Display messages
+    const emptyState = document.getElementById('emptyState');
+    emptyState.style.display = 'none';
+    
+    conversationHistory.forEach(msg => {
+      displayMessage(msg.role, msg.content, msg.timestamp, false);
+    });
+    
+    scrollToBottom();
+  }
+}
+
+/**
+ * Send message to AI
+ */
+async function sendMessage() {
+  const messageInput = document.getElementById('messageInput');
+  const query = messageInput.value.trim();
+  
+  if (!query || isLoading) return;
+  
+  // Clear input and disable
+  messageInput.value = '';
+  messageInput.style.height = 'auto';
+  isLoading = true;
+  document.getElementById('sendBtn').disabled = true;
+  
+  // Hide empty state
+  document.getElementById('emptyState').style.display = 'none';
+  
+  // Display user message
+  const timestamp = new Date().toISOString();
+  displayMessage('user', query, timestamp);
+  
+  // Add to history
+  conversationHistory.push({ role: 'user', content: query, timestamp });
+  await saveConversationHistory();
+  
+  // Show typing indicator
+  showTypingIndicator();
+  
+  try {
+    // Get context data
+    const context = await getContextData();
+    
+    // Get or create session ID
+    if (!currentSessionId) {
+      currentSessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+      await chrome.storage.local.set({ session_id: currentSessionId });
+    }
+    
+    // Send to backend
+    const response = await fetch(`${API_BASE_URL}/chat/query`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        query: query,
+        context: context,
+        sessionId: currentSessionId,
+        conversationHistory: conversationHistory.slice(-10) // Last 10 messages for context
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error(`Backend returned ${response.status}`);
+    }
+    
+    const data = await response.json();
+    
+    // Hide typing indicator
+    hideTypingIndicator();
+    
+    // Display assistant response
+    const responseTimestamp = new Date().toISOString();
+    displayMessage('assistant', data.response, responseTimestamp);
+    
+    // Add to history
+    conversationHistory.push({ 
+      role: 'assistant', 
+      content: data.response, 
+      timestamp: responseTimestamp 
+    });
+    await saveConversationHistory();
+    
+  } catch (error) {
+    console.error('❌ Send message error:', error);
+    
+    // Hide typing indicator
+    hideTypingIndicator();
+    
+    // Show error message
+    const errorMsg = `Sorry, I couldn't process your question. ${error.message}\n\nMake sure the backend is running at ${API_BASE_URL}`;
+    displayMessage('assistant', errorMsg, new Date().toISOString());
+    
+  } finally {
+    isLoading = false;
+    document.getElementById('sendBtn').disabled = false;
+    messageInput.focus();
+  }
+}
+
+/**
+ * Display a message in the chat
+ */
+function displayMessage(role, content, timestamp, animate = true) {
+  const messagesArea = document.getElementById('messagesArea');
+  
+  const messageDiv = document.createElement('div');
+  messageDiv.className = `message ${role}`;
+  if (!animate) {
+    messageDiv.style.animation = 'none';
+  }
+  
+  const bubbleDiv = document.createElement('div');
+  bubbleDiv.className = 'message-bubble';
+  bubbleDiv.textContent = content;
+  
+  const timeDiv = document.createElement('div');
+  timeDiv.className = 'message-time';
+  timeDiv.textContent = formatTime(timestamp);
+  
+  messageDiv.appendChild(bubbleDiv);
+  messageDiv.appendChild(timeDiv);
+  messagesArea.appendChild(messageDiv);
+  
+  scrollToBottom();
+}
+
+/**
+ * Show typing indicator
+ */
+function showTypingIndicator() {
+  const messagesArea = document.getElementById('messagesArea');
+  
+  const indicatorDiv = document.createElement('div');
+  indicatorDiv.className = 'message assistant';
+  indicatorDiv.id = 'typingIndicator';
+  
+  const typingDiv = document.createElement('div');
+  typingDiv.className = 'typing-indicator';
+  typingDiv.innerHTML = `
+    <div class="typing-dot"></div>
+    <div class="typing-dot"></div>
+    <div class="typing-dot"></div>
+  `;
+  
+  indicatorDiv.appendChild(typingDiv);
+  messagesArea.appendChild(indicatorDiv);
+  
+  scrollToBottom();
+}
+
+/**
+ * Hide typing indicator
+ */
+function hideTypingIndicator() {
+  const indicator = document.getElementById('typingIndicator');
+  if (indicator) {
+    indicator.remove();
+  }
+}
+
+/**
+ * Scroll messages to bottom
+ */
+function scrollToBottom() {
+  const messagesArea = document.getElementById('messagesArea');
+  messagesArea.scrollTop = messagesArea.scrollHeight;
+}
+
+/**
+ * Format timestamp for display
+ */
+function formatTime(timestamp) {
+  const date = new Date(timestamp);
+  const now = new Date();
+  
+  const diff = now - date;
+  const minutes = Math.floor(diff / 60000);
+  
+  if (minutes < 1) return 'Just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  
+  return date.toLocaleDateString();
+}
+
+/**
+ * Get context data for AI
+ */
+async function getContextData() {
+  const data = await chrome.storage.local.get([
+    'brightspace_courses',
+    'brightspace_grades',
+    'brightspace_assignments',
+    'brightspace_announcements',
+    'latest_extracted_data'
+  ]);
+  
+  // Filter courses if needed
+  let courses = data.brightspace_courses || [];
+  if (currentTermOnly) {
+    courses = filterCurrentTermCourses(courses);
+    console.log(`🎓 Filtered to ${courses.length} current term courses`);
+  }
+  
+  // Get org unit IDs of current courses for filtering other data
+  const currentOrgUnitIds = new Set(courses.map(c => c.orgUnitId).filter(Boolean));
+  
+  // Filter grades, assignments, and announcements to match current courses
+  let grades = data.brightspace_grades || [];
+  let assignments = data.brightspace_assignments || [];
+  let announcements = data.brightspace_announcements || [];
+  
+  if (currentTermOnly && currentOrgUnitIds.size > 0) {
+    grades = grades.filter(g => currentOrgUnitIds.has(g.orgUnitId));
+    assignments = assignments.filter(a => currentOrgUnitIds.has(a.orgUnitId));
+    announcements = announcements.filter(a => currentOrgUnitIds.has(a.orgUnitId));
+    console.log(`🎓 Filtered to current term: ${grades.length} grade sets, ${assignments.length} assignment sets, ${announcements.length} announcement sets`);
+  }
+  
+  return {
+    courses: courses,
+    grades: grades,
+    assignments: assignments,
+    announcements: announcements,
+    currentPage: data.latest_extracted_data || {},
+    currentTermOnly: currentTermOnly
+  };
+}
+
+/**
+ * Save conversation history to storage
+ */
+async function saveConversationHistory() {
+  await chrome.storage.local.set({
+    conversation_history: conversationHistory,
+    session_id: currentSessionId,
+    last_conversation_update: new Date().toISOString()
+  });
+}
+
+/**
+ * Clear chat history
+ */
+async function clearChat() {
+  // Better confirmation dialog
+  const messageCount = conversationHistory.length;
+  const confirmMessage = messageCount === 0 
+    ? 'Start a new conversation?'
+    : `Clear all ${messageCount} messages and start fresh?\n\nThis will delete your entire conversation history.`;
+  
+  if (!confirm(confirmMessage)) return;
+  
+  console.log('🗑️ Clearing conversation history...');
+  
+  conversationHistory = [];
+  currentSessionId = null;
+  
+  await chrome.storage.local.remove(['conversation_history', 'session_id', 'last_conversation_update']);
+  
+  // Clear UI
+  const messagesArea = document.getElementById('messagesArea');
+  messagesArea.innerHTML = `
+    <div class="empty-state" id="emptyState">
+      <div class="empty-state-icon">💬</div>
+      <div class="empty-state-title">Chat Cleared!</div>
+      <div class="empty-state-text">
+        Ask me anything about your courses, grades, assignments, or upcoming deadlines.
+      </div>
+      <div class="suggestion-chips">
+        <div class="suggestion-chip" data-query="What courses do I have?">📚 My courses</div>
+        <div class="suggestion-chip" data-query="What's my grade in CSI2532?">📊 Check grades</div>
+        <div class="suggestion-chip" data-query="What assignments are due this week?">📝 Due soon</div>
+        <div class="suggestion-chip" data-query="Any new announcements?">📢 Announcements</div>
+      </div>
+    </div>
+  `;
+  
+  // Re-add suggestion chip listeners
+  document.querySelectorAll('.suggestion-chip').forEach(chip => {
+    chip.addEventListener('click', function() {
+      const query = this.dataset.query;
+      document.getElementById('messageInput').value = query;
+      sendMessage();
+    });
+  });
+  
+  console.log('✅ Chat cleared successfully');
+}
+
+/**
+ * Toggle settings panel
+ */
+function toggleSettings() {
+  const panel = document.getElementById('settingsPanel');
+  panel.classList.toggle('show');
+}
+
+/**
+ * Refresh all data
+ */
+async function refreshData() {
+  updateStatus('Refreshing...', 'loading');
+  
+  try {
+    await syncAllCourses();
+    await fetchData('grades');
+    await fetchData('assignments');
+    await fetchData('announcements');
+    
+    updateStatus('Data refreshed');
+    updateDataInfo();
+  } catch (error) {
+    console.error('Refresh error:', error);
+    updateStatus('Refresh failed', 'error');
+  }
+}
+
+/**
+ * Sync all courses
+ */
+async function syncAllCourses() {
+  console.log('🔄 Syncing courses...');
+  const btn = document.getElementById('syncCoursesBtn');
+  const originalText = btn.textContent;
   
   btn.disabled = true;
-  btn.textContent = 'Extracting...';
-  dataDiv.style.display = 'block';
-  dataDiv.innerHTML = 'Extracting data from page...';
+  btn.textContent = 'Syncing...';
   
-  chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const tab = tabs[0];
     
     if (!tab.url.includes('brightspace.com')) {
-      dataDiv.innerHTML = '❌ Please navigate to a Brightspace page first';
-      btn.disabled = false;
-      btn.textContent = 'Extract Current Page Data';
-      return;
+      throw new Error('Not on Brightspace');
     }
     
-    chrome.tabs.sendMessage(tab.id, { action: 'extractData' }, function(data) {
-      if (chrome.runtime.lastError) {
-        console.error('❌ Extraction error:', chrome.runtime.lastError);
-        dataDiv.innerHTML = `❌ Error: ${chrome.runtime.lastError.message}<br><br>Make sure:<br>
-          • You're on a Brightspace page<br>
-          • The page has fully loaded<br>
-          • You've refreshed the page after installing the extension`;
-        btn.disabled = false;
-        btn.textContent = 'Extract Current Page Data';
-        return;
-      }
-      
-      console.log('📊 Extracted data:', data);
-      
-      // Format and display the data
-      let html = `<strong>Page Type:</strong> ${data.pageType}<br><br>`;
-      
-      if (data.courses && data.courses.length > 0) {
-        html += `<strong>📚 Courses Found:</strong> ${data.courses.length}<br>`;
-        data.courses.slice(0, 3).forEach(course => {
-          html += `• ${course.name}<br>`;
-        });
-        if (data.courses.length > 3) {
-          html += `... and ${data.courses.length - 3} more<br>`;
+    const result = await new Promise((resolve, reject) => {
+      chrome.tabs.sendMessage(tab.id, { action: 'extractCourses' }, (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+        } else {
+          resolve(response);
         }
-      }
-      
-      if (data.grades && data.grades.grades) {
-        html += `<br><strong>📊 Grades Found:</strong> ${data.grades.grades.length}<br>`;
-      }
-      
-      if (data.assignments && data.assignments.assignments) {
-        html += `<br><strong>📝 Assignments Found:</strong> ${data.assignments.assignments.length}<br>`;
-      }
-      
-      if (data.announcements && data.announcements.announcements) {
-        html += `<br><strong>📢 Announcements Found:</strong> ${data.announcements.announcements.length}<br>`;
-      }
-      
-      html += `<br><pre>${JSON.stringify(data, null, 2).substring(0, 500)}...</pre>`;
-      
-      dataDiv.innerHTML = html;
-      
-      // Store the data
-      chrome.storage.local.set({ 
-        'latest_extracted_data': data,
-        'last_extraction': new Date().toISOString()
+      });
+    });
+    
+    if (result.courses && result.courses.length > 0) {
+      await chrome.storage.local.set({
+        brightspace_courses: result.courses,
+        last_sync: new Date().toISOString()
       });
       
-      btn.disabled = false;
-      btn.textContent = 'Extract Current Page Data';
+      console.log(`✅ Synced ${result.courses.length} courses`);
+      updateDataInfo();
+    }
+    
+  } catch (error) {
+    console.error('Sync error:', error);
+    alert(`Sync failed: ${error.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+/**
+ * Fetch data (grades, assignments, or announcements)
+ */
+async function fetchData(type) {
+  console.log(`📊 Fetching ${type}...`);
+  
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs[0];
+    
+    const actionMap = {
+      'grades': 'fetchAllGrades',
+      'assignments': 'fetchAllAssignments',
+      'announcements': 'fetchAllAnnouncements'
+    };
+    
+    const result = await new Promise((resolve, reject) => {
+      chrome.tabs.sendMessage(tab.id, { action: actionMap[type] }, (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+        } else {
+          resolve(response);
+        }
+      });
     });
-  });
+    
+    if (result[type]) {
+      await chrome.storage.local.set({
+        [`brightspace_${type}`]: result[type],
+        [`last_${type}_fetch`]: new Date().toISOString()
+      });
+      
+      console.log(`✅ Fetched ${result[type].length} ${type}`);
+      updateDataInfo();
+    }
+    
+  } catch (error) {
+    console.error(`Fetch ${type} error:`, error);
+  }
 }
 
 /**
  * Test backend connection
  */
-function testBackendConnection() {
-  console.log('🔌 Testing backend connection...');
-  const btn = document.getElementById('testBackendBtn');
-  const statusDiv = document.getElementById('backendStatus');
-  
-  btn.disabled = true;
-  btn.textContent = 'Testing...';
-  statusDiv.style.display = 'block';
-  statusDiv.innerHTML = 'Connecting to backend...';
-  
-  fetch(`${API_BASE_URL}/health`)
-    .then(response => {
-      if (!response.ok) {
-        throw new Error(`Backend returned status ${response.status}`);
-      }
-      return response.json();
-    })
-    .then(health => {
-      console.log('✅ Backend health:', health);
-      statusDiv.innerHTML = `
-        ✅ <strong>Backend Connected!</strong><br>
-        Status: ${health.status}<br>
-        Version: ${health.version || 'N/A'}
-      `;
-      btn.disabled = false;
-      btn.textContent = 'Test Backend Connection';
-    })
-    .catch(error => {
-      console.error('❌ Backend connection error:', error);
-      statusDiv.innerHTML = `
-        ❌ <strong>Backend Not Connected</strong><br>
-        Error: ${error.message}<br><br>
-        Make sure your backend is running at:<br>
-        <code>http://localhost:8001</code><br><br>
-        Start it with:<br>
-        <code>cd backend && python -m uvicorn app.main:app --reload --port 8001</code>
-      `;
-      btn.disabled = false;
-      btn.textContent = 'Test Backend Connection';
-    });
-}
-
-/**
- * Send test query to backend
- */
-function sendTestQuery() {
-  console.log('💬 Sending test query...');
-  const btn = document.getElementById('sendTestBtn');
-  const queryInput = document.getElementById('testQuery');
-  const responseDiv = document.getElementById('testResponse');
-  
-  const query = queryInput.value.trim();
-  
-  if (!query) {
-    alert('Please enter a question');
-    return;
+async function testBackend() {
+  try {
+    const response = await fetch(`${API_BASE_URL}/health`);
+    if (response.ok) {
+      alert('✅ Backend connection successful!');
+    } else {
+      throw new Error(`Status ${response.status}`);
+    }
+  } catch (error) {
+    alert(`❌ Backend connection failed: ${error.message}\n\nMake sure backend is running on ${API_BASE_URL}`);
   }
-  
-  btn.disabled = true;
-  btn.textContent = 'Sending...';
-  responseDiv.style.display = 'block';
-  responseDiv.innerHTML = 'Waiting for AI response...';
-  
-  // Get stored course data
-  chrome.storage.local.get([
-    'brightspace_courses',
-    'latest_extracted_data',
-    'brightspace_grades',
-    'brightspace_assignments',
-    'brightspace_announcements'
-  ], function(stored) {
-    const context = {
-      courses: stored.brightspace_courses || [],
-      currentPage: stored.latest_extracted_data || {},
-      grades: stored.brightspace_grades || [],
-      assignments: stored.brightspace_assignments || [],
-      announcements: stored.brightspace_announcements || []
-    };
-    
-    console.log('📤 Sending query:', query);
-    console.log('📦 Context:', context);
-    
-    // Get or create session ID
-    chrome.storage.local.get(['session_id'], function(result) {
-      let sessionId = result.session_id;
-      if (!sessionId) {
-        sessionId = 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-        chrome.storage.local.set({ session_id: sessionId });
-      }
-      
-      // Send to backend
-      fetch(`${API_BASE_URL}/chat/query`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          query: query,
-          context: context,
-          sessionId: sessionId
-        })
-      })
-      .then(response => {
-        if (!response.ok) {
-          return response.text().then(text => {
-            throw new Error(`Backend returned ${response.status}: ${text}`);
-          });
-        }
-        return response.json();
-      })
-      .then(data => {
-        console.log('📥 Response:', data);
-        responseDiv.innerHTML = `
-          <strong>AI Response:</strong><br>
-          ${data.response || data.message || JSON.stringify(data)}
-        `;
-        queryInput.value = '';
-        btn.disabled = false;
-        btn.textContent = 'Send Test Query';
-      })
-      .catch(error => {
-        console.error('❌ Query error:', error);
-        responseDiv.innerHTML = `
-          ❌ <strong>Error:</strong><br>
-          ${error.message}<br><br>
-          Make sure:<br>
-          • Backend is running<br>
-          • /api/chat/query endpoint exists<br>
-          • CORS is configured
-        `;
-        btn.disabled = false;
-        btn.textContent = 'Send Test Query';
-      });
-    });
-  });
 }
 
 /**
- * Sync all courses from Brightspace
+ * View debug logs
  */
-function syncAllCourses() {
-  console.log('🔄 Syncing all courses...');
-  const btn = document.getElementById('syncAllBtn');
-  const statusDiv = document.getElementById('syncStatus');
-  const progressDiv = document.getElementById('syncProgress');
+async function viewLogs() {
+  const data = await chrome.storage.local.get(['conversation_history', 'eventLogs']);
   
-  btn.disabled = true;
-  btn.textContent = 'Syncing...';
-  progressDiv.style.display = 'block';
-  progressDiv.innerHTML = 'Starting sync...';
+  console.log('📋 Conversation History:', data.conversation_history);
+  console.log('📋 Event Logs:', data.eventLogs);
   
-  chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
-    const tab = tabs[0];
-    
-    if (!tab.url.includes('brightspace.com/d2l/home')) {
-      progressDiv.innerHTML = '❌ Please navigate to the Brightspace home page first<br>' +
-                             'Go to: https://uottawa.brightspace.com/d2l/home';
-      btn.disabled = false;
-      btn.textContent = 'Sync All My Courses';
-      return;
-    }
-    
-    progressDiv.innerHTML = 'Extracting courses from Shadow DOM...<br>(Waiting for page to load, this may take up to 5 seconds)';
-    
-    // Wait a bit longer for Shadow DOM to render, then try extraction
-    setTimeout(function() {
-      // Extract courses
-      chrome.tabs.sendMessage(tab.id, { action: 'extractCourses' }, function(result) {
-        if (chrome.runtime.lastError) {
-          console.error('❌ Sync error:', chrome.runtime.lastError);
-          progressDiv.innerHTML = `
-            ❌ <strong>Sync Failed:</strong><br>
-            ${chrome.runtime.lastError.message}<br><br>
-            <strong>Troubleshooting:</strong><br>
-            1. Make sure you're on: uottawa.brightspace.com/d2l/home<br>
-            2. Wait 2-3 seconds for the page to fully load<br>
-            3. Try refreshing the page<br>
-            4. Check the browser console (F12) for errors
-          `;
-          statusDiv.innerHTML = '❌ Sync failed';
-          btn.disabled = false;
-          btn.textContent = 'Sync All My Courses';
-          return;
-        }
-        
-        if (!result || !result.courses || result.courses.length === 0) {
-          progressDiv.innerHTML = `
-            ❌ <strong>No courses found</strong><br><br>
-            Make sure:<br>
-            1. You're on the home page<br>
-            2. The page has fully loaded (wait 5 seconds)<br>
-            3. You can see your course tiles on the page<br><br>
-            Try: Close this popup, wait 5 seconds, then open it again and click Sync.
-          `;
-          statusDiv.innerHTML = '❌ No courses found';
-          btn.disabled = false;
-          btn.textContent = 'Sync All My Courses';
-          return;
-        }
-        
-        const courses = result.courses;
-        console.log('✅ Found courses:', courses);
-        
-        progressDiv.innerHTML = `Found ${courses.length} courses. Saving...`;
-        
-        // Store courses
-        chrome.storage.local.set({ 
-          brightspace_courses: courses,
-          last_sync: new Date().toISOString()
-        }, function() {
-          // Display results
-          let html = `<strong>✅ Synced ${courses.length} courses:</strong><br><br>`;
-          courses.forEach((course, i) => {
-            html += `${i + 1}. ${course.name}<br>`;
-            html += `   Code: ${course.code}<br>`;
-            if (course.homepage) {
-              html += `   <a href="${course.homepage}" target="_blank">View Course</a><br>`;
-            }
-            html += `<br>`;
-          });
-          
-          progressDiv.innerHTML = html;
-          statusDiv.innerHTML = `✅ Last synced: ${new Date().toLocaleTimeString()}`;
-          
-          // Try to send to backend
-          chrome.storage.local.get(['user_id'], function(result) {
-            let userId = result.user_id;
-            if (!userId) {
-              userId = 'user_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-              chrome.storage.local.set({ user_id: userId });
-            }
-            
-            fetch(`${API_BASE_URL}/courses/sync`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify({
-                courses: courses,
-                userId: userId
-              })
-            })
-            .then(response => response.json())
-            .then(data => {
-              console.log('✅ Courses synced to backend:', data);
-            })
-            .catch(error => {
-              console.warn('⚠️ Could not sync to backend:', error.message);
-            });
-          });
-          
-          btn.disabled = false;
-          btn.textContent = 'Sync All My Courses';
-        });
-      });
-    }, 3000); // Wait 3 seconds for Shadow DOM to fully render
-  });
+  alert('Debug logs printed to console (F12)');
 }
 
-/**
- * Fetch all grades from Brightspace API
- */
-function fetchAllGrades() {
-  console.log('📊 Fetching all grades...');
-  const btn = document.getElementById('fetchGradesBtn');
-  const dataDiv = document.getElementById('gradesData');
-  
-  btn.disabled = true;
-  btn.textContent = 'Fetching...';
-  dataDiv.style.display = 'block';
-  dataDiv.innerHTML = 'Fetching grades from all courses...';
-  
-  chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
-    const tab = tabs[0];
-    
-    if (!tab.url.includes('brightspace.com')) {
-      dataDiv.innerHTML = '❌ Please navigate to Brightspace first';
-      btn.disabled = false;
-      btn.textContent = 'Fetch All Grades';
-      return;
-    }
-    
-    chrome.tabs.sendMessage(tab.id, { action: 'fetchAllGrades' }, function(result) {
-      if (chrome.runtime.lastError) {
-        console.error('❌ Error:', chrome.runtime.lastError);
-        dataDiv.innerHTML = `❌ Error: ${chrome.runtime.lastError.message}`;
-        btn.disabled = false;
-        btn.textContent = 'Fetch All Grades';
-        return;
-      }
-      
-      const grades = result.grades || [];
-      console.log('📊 Grades:', grades);
-      
-      let html = `<strong>✅ Fetched grades for ${grades.length} courses:</strong><br><br>`;
-      
-      grades.forEach(courseGrades => {
-        if (courseGrades.grades && courseGrades.grades.length > 0) {
-          html += `<strong>${courseGrades.courseCode}</strong> - ${courseGrades.courseName}<br>`;
-          courseGrades.grades.forEach(grade => {
-            html += `  • ${grade.name}: ${grade.displayedGrade || 'N/A'}<br>`;
-          });
-          html += '<br>';
-        }
-      });
-      
-      dataDiv.innerHTML = html;
-      
-      // Store grades
-      chrome.storage.local.set({
-        'brightspace_grades': grades,
-        'last_grades_fetch': new Date().toISOString()
-      });
-      
-      btn.disabled = false;
-      btn.textContent = 'Fetch All Grades';
-    });
-  });
-}
-
-/**
- * Fetch all assignments from Brightspace API
- */
-function fetchAllAssignments() {
-  console.log('📝 Fetching all assignments...');
-  const btn = document.getElementById('fetchAssignmentsBtn');
-  const dataDiv = document.getElementById('assignmentsData');
-  
-  btn.disabled = true;
-  btn.textContent = 'Fetching...';
-  dataDiv.style.display = 'block';
-  dataDiv.innerHTML = 'Fetching assignments from all courses...';
-  
-  chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
-    const tab = tabs[0];
-    
-    if (!tab.url.includes('brightspace.com')) {
-      dataDiv.innerHTML = '❌ Please navigate to Brightspace first';
-      btn.disabled = false;
-      btn.textContent = 'Fetch All Assignments';
-      return;
-    }
-    
-    chrome.tabs.sendMessage(tab.id, { action: 'fetchAllAssignments' }, function(result) {
-      if (chrome.runtime.lastError) {
-        console.error('❌ Error:', chrome.runtime.lastError);
-        dataDiv.innerHTML = `❌ Error: ${chrome.runtime.lastError.message}`;
-        btn.disabled = false;
-        btn.textContent = 'Fetch All Assignments';
-        return;
-      }
-      
-      const assignments = result.assignments || [];
-      console.log('📝 Assignments:', assignments);
-      
-      let html = `<strong>✅ Fetched assignments for ${assignments.length} courses:</strong><br><br>`;
-      
-      assignments.forEach(courseAssignments => {
-        if (courseAssignments.assignments && courseAssignments.assignments.length > 0) {
-          html += `<strong>${courseAssignments.courseCode}</strong><br>`;
-          courseAssignments.assignments.forEach(assignment => {
-            html += `  • ${assignment.name}`;
-            if (assignment.dueDate) {
-              html += ` - Due: ${new Date(assignment.dueDate).toLocaleDateString()}`;
-            }
-            html += '<br>';
-          });
-          html += '<br>';
-        }
-      });
-      
-      dataDiv.innerHTML = html;
-      
-      // Store assignments
-      chrome.storage.local.set({
-        'brightspace_assignments': assignments,
-        'last_assignments_fetch': new Date().toISOString()
-      });
-      
-      btn.disabled = false;
-      btn.textContent = 'Fetch All Assignments';
-    });
-  });
-}
-
-/**
- * Fetch all announcements from Brightspace API
- */
-function fetchAllAnnouncements() {
-  console.log('📢 Fetching all announcements...');
-  const btn = document.getElementById('fetchAnnouncementsBtn');
-  const dataDiv = document.getElementById('announcementsData');
-  
-  btn.disabled = true;
-  btn.textContent = 'Fetching...';
-  dataDiv.style.display = 'block';
-  dataDiv.innerHTML = 'Fetching announcements from all courses...';
-  
-  chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {
-    const tab = tabs[0];
-    
-    if (!tab.url.includes('brightspace.com')) {
-      dataDiv.innerHTML = '❌ Please navigate to Brightspace first';
-      btn.disabled = false;
-      btn.textContent = 'Fetch All Announcements';
-      return;
-    }
-    
-    chrome.tabs.sendMessage(tab.id, { action: 'fetchAllAnnouncements' }, function(result) {
-      if (chrome.runtime.lastError) {
-        console.error('❌ Error:', chrome.runtime.lastError);
-        dataDiv.innerHTML = `❌ Error: ${chrome.runtime.lastError.message}`;
-        btn.disabled = false;
-        btn.textContent = 'Fetch All Announcements';
-        return;
-      }
-      
-      const announcements = result.announcements || [];
-      console.log('📢 Announcements:', announcements);
-      
-      let html = `<strong>✅ Fetched announcements for ${announcements.length} courses:</strong><br><br>`;
-      
-      announcements.forEach(courseAnnouncements => {
-        if (courseAnnouncements.announcements && courseAnnouncements.announcements.length > 0) {
-          html += `<strong>${courseAnnouncements.courseCode}</strong><br>`;
-          courseAnnouncements.announcements.slice(0, 3).forEach(announcement => {
-            html += `  • ${announcement.title}<br>`;
-          });
-          html += '<br>';
-        }
-      });
-      
-      dataDiv.innerHTML = html;
-      
-      // Store announcements
-      chrome.storage.local.set({
-        'brightspace_announcements': announcements,
-        'last_announcements_fetch': new Date().toISOString()
-      });
-      
-      btn.disabled = false;
-      btn.textContent = 'Fetch All Announcements';
-    });
-  });
-}
-
-console.log('✅ All functions defined');
+console.log('✅ Chat functions initialized');
